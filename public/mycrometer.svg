@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.2" width="512" height="512" viewBox="0 0 512 512" preserveAspectRatio="xMidYMid" fill-rule="evenodd" stroke-width="28.222" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" xmlns:ooo="http://xml.openoffice.org/svg/export" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:presentation="http://sun.com/xmlns/staroffice/presentation" xmlns:smil="http://www.w3.org/2001/SMIL20/" xmlns:anim="urn:oasis:names:tc:opendocument:xmlns:animation:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xml:space="preserve">
+  <!-- Your exact background color from image -->
+  <rect width="512" height="512" rx="112" fill="#40534d" />
+
+  <!-- SCALING & ALIGNMENT OUTER CONTAINER -->
+  <!-- This group scales the artwork around the central anchor point (256, 185) -->
+  <g transform="translate(256, 185) scale(1.5) translate(-256, -155)">
+    
+    <!-- MICROSCOPE CALIBRATION GRAPHICS -->
+    <circle cx="256" cy="185" r="115" stroke="#C96F53" stroke-width="4" fill="none" opacity="0.4" />
+    <line x1="110" y1="185" x2="402" y2="185" stroke="#C96F53" stroke-width="2" opacity="0.3" />
+    <line x1="256" y1="40" x2="256" y2="330" stroke="#C96F53" stroke-width="2" opacity="0.3" />
+
+
+    <!-- THE MUSHROOM SPORE -->
+    <g transform="translate(260, 170), rotate(-45), scale(1.5)">
+		<g stroke-linejoin="round" stroke-width="8">
+    
+  
+  <!-- LAAG 1: De Basis (Subtielere asymmetrische spoelvorm) -->
+  <path d="M -70,0 
+           C -32,-30  18,-30   50,0 
+           C  32,50  -50,50   -70,0 Z" 
+        fill="#cfc49d" stroke="#cfc49d" stroke-width="8" />
+
+  <!-- LAAG 2: De Binnenkant (Loopt nu perfect parallel mee met de slankere vorm) -->
+  <path d="M -62,0 
+           C -28,-22  14,-22   42,0 
+           C  25,40  -42,40   -62,0 Z" 
+        fill="#fdf1db" stroke="#fdf1db" stroke-width="4" />
+
+  <!-- LAAG 3: De 3D Highlight (Slanke lichtboog aangepast aan de nieuwe bolling) -->
+  <path d="M -50,12 
+           C -25,28   0,28    25,12 
+           C  10,18  -35,18   -50,12 Z" 
+        fill="#ffffff" opacity="0.6" />
+		</g>
+	</g>
+
+    <!-- THE MUSHROOM SPORE -->
+    <!--g transform="translate(256, 185) rotate(45), skewY(10)">
+      <ellipse cx="0" cy="0" rx="44" ry="92" fill="#cfc49d" />
+      <ellipse cx="0" cy="0" rx="40" ry="86" fill="#fdf1db" />
+      <ellipse cx="-12" cy="-20" rx="12" ry="46" fill="#ffffff" opacity="0.6" />
+
+    </g-->
+
+    <!-- ASSISTED IMAGE PROCESSING BOUNDING BOX -->
+    <g stroke="#d89684" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 175,115 L 175,95 L 195,95" />
+      <path d="M 337,115 L 337,95 L 317,95" />
+      <path d="M 175,255 L 175,275 L 195,275" />
+      <path d="M 337,255 L 337,275 L 317,275" />
+    </g>
+
+  </g>
+
+  <!-- TYPOGRAPHY LAYER -->
+  <!-- Base font set to a robust, heavy geometric sans-serif stack -->
+  <g font-family="Impact, 'Arial Black', sans-serif" font-weight="900" transform="translate(256, 445)" text-anchor="middle">
+    
+    <!-- MYCO BASE LAYER (Primary Syllable) -->
+    <!-- Hand-spaced to create explicit visual gaps for the overlapping elements -->
+    <g fill="#96ab88" font-size="44">
+      <!-- 'M' -->
+      <text x="-121" y="0">M</text>
+      <!-- 'Y' overlapping the faded 'I' underneath -->
+      <text x="-85" y="0" fill-opacity="0.85">I</text>
+      <!-- 'C' shifted left to leave room for the incoming 'R' -->
+      <text x="-57" y="0">C</text>
+      <!-- 'O' shifted right to finish the MYCO prefix block -->
+      <text x="0" y="0">O</text>
+    </g>
+
+    <!-- MICRO ALTERNATE LAYER (Faded/Semi-transparent Overlay) -->
+    <!-- Contains the 'I' directly overlapping the 'Y' and the 'R' placed between 'C' and 'O' -->
+    <g fill="#cfc49d" opacity="0.65" font-size="44" letter-spacing="1" font-weight="100">
+      <!-- 'I' positioned precisely over the 'Y' slot -->
+      <text x="-85" y="0">y</text>
+      <!-- 'R' positioned precisely between the 'C' and 'O' slot -->
+      <text x="-29" y="0">r</text>
+    </g>
+
+    <!-- METER LAYER (Robust, Smaller, Cap-Case Follower) -->
+    <!-- Set to a high-contrast warm white/light gray in all caps -->
+    <g fill="#597b60" font-size="30" letter-spacing="2">
+      <text x="75" y="-2">METER</text>
+    </g>
+    
+  </g>
+</svg>
