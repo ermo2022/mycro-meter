@@ -1,0 +1,37 @@
+name: Upload Release Assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # Needed to attach files to the release asset page
+
+jobs:
+  upload-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build production assets
+        run: npm run build
+
+      - name: Zip the Dist Folder
+        run: zip -r mycro-meter-${{ github.event.release.tag_name }}.zip ./dist
+
+      - name: Upload Zip to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} mycro-meter-${{ github.event.release.tag_name }}.zip --clobber
+
