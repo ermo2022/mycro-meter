@@ -585,6 +585,12 @@ function App() {
     return point
   }
 
+  const findBoxAtPoint = (point: Point) => {
+    return [...measurements].reverse().find((measurement): measurement is Extract<Measurement, { kind: 'box' }> => {
+      return measurement.kind === 'box' && boxContainsPoint(measurement.rect, point)
+    }) ?? null
+  }
+
   const detectAtPoint = async (point: Point) => {
     const image = imageRef.current
     if (!image || !calibration || detecting || pointDetectionRef.current) return
@@ -644,10 +650,7 @@ function App() {
     const point = toImagePoint(event)
     if (!point) return
     if (tool === 'select') {
-      const measuredBox = [...measurements].reverse().find((measurement): measurement is Extract<Measurement, { kind: 'box' }> => {
-        return measurement.kind === 'box'
-          && boxContainsPoint(measurement.rect, point)
-      })
+      const measuredBox = findBoxAtPoint(point)
       if (measuredBox) {
         setBoxEditor({ objectId: measuredBox.objectId, measurementId: measuredBox.id, rect: measuredBox.rect })
         return
@@ -746,6 +749,11 @@ function App() {
     setManualStart(null)
     setManualDraft(null)
     if (gesture && gesture.pointerId === event.pointerId && !gesture.moved && distance(gesture.start, { x: event.clientX, y: event.clientY }) <= 5 && end) {
+      const measuredBox = findBoxAtPoint(end)
+      if (measuredBox) {
+        setBoxEditor({ objectId: measuredBox.objectId, measurementId: measuredBox.id, rect: measuredBox.rect })
+        return
+      }
       void detectAtPoint(end)
       return
     }
