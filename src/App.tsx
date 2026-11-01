@@ -419,9 +419,7 @@ function App() {
           const box = normalizeOrientedBox(measurement.rect)
           drawBox(box, '#c54831', 2)
           midpoint = imageToCanvas({ x: box.centerX, y: box.centerY })
-          value = calibration
-            ? `${formatLength(box.width / calibration.pixelsPerUnit)} × ${formatLength(box.height / calibration.pixelsPerUnit)} ${calibration.unit} · ${box.angle.toFixed(1)}°`
-            : `${box.width.toFixed(0)} × ${box.height.toFixed(0)} px · ${box.angle.toFixed(1)}°`
+          value = formatBoxDimensionsText(box.width, box.height, calibration ?? undefined)
         }
         context.font = '600 12px "IBM Plex Mono", monospace'
         const labelWidth = context.measureText(value).width + 12
@@ -1062,7 +1060,7 @@ function App() {
                             : calibration ? `${formatLength(measurement.rect.width / calibration.pixelsPerUnit)} × ${formatLength(measurement.rect.height / calibration.pixelsPerUnit)}` : `${measurement.rect.width.toFixed(0)} × ${measurement.rect.height.toFixed(0)}`}</strong>
                           <small>{measurement.kind === 'distance'
                             ? `${calibration?.unit ?? 'px'} · ${measurement.pixels.toFixed(1)} px`
-                            : `L × W ${calibration?.unit ?? 'px'} · ${measurement.rect.width.toFixed(0)} × ${measurement.rect.height.toFixed(0)} px · Q ${q?.toFixed(2)} · ${measurement.rect.angle.toFixed(1)}°`}</small>
+                            : `L × W ${calibration?.unit ?? 'px'} · ${measurement.rect.width.toFixed(0)} × ${measurement.rect.height.toFixed(0)} px · Q ${q?.toFixed(2)}`}</small>
                         </span>
                         {lengthShorter && <span className="measurement-warning" title={t('Q < 1: length is shorter than width')} aria-hidden="true">⚠</span>}
                       </button>
@@ -1690,7 +1688,7 @@ function BoxEditorDialog({ image, imageSize, editor, unit, pixelsPerUnit, onChan
           onPointerCancel={onPointerUp}
         />
         <footer className="box-editor-footer">
-          <span className="box-editor-dimensions">{formatLength(editor.rect.width / pixelsPerUnit)} × {formatLength(editor.rect.height / pixelsPerUnit)} {unit} · {editor.rect.angle.toFixed(1)}°</span>
+          <span className="box-editor-dimensions">{formatBoxDimensionsText(editor.rect.width, editor.rect.height, { pixelsPerUnit, unit })}</span>
           <div className="box-editor-actions">
             <button className="button box-editor-cancel" type="button" onClick={onClose}>{t('Cancel')}</button>
             <button className="button button-primary" type="button" onClick={onAccept}>{t('Accept dimensions')}</button>
@@ -1699,6 +1697,13 @@ function BoxEditorDialog({ image, imageSize, editor, unit, pixelsPerUnit, onChan
       </section>
     </div>
   )
+}
+
+export function formatBoxDimensionsText(width: number, height: number, calibration?: { pixelsPerUnit: number, unit: string }) {
+  if (calibration) {
+    return `${formatLength(width / calibration.pixelsPerUnit)} × ${formatLength(height / calibration.pixelsPerUnit)} ${calibration.unit}`
+  }
+  return `${width.toFixed(0)} × ${height.toFixed(0)} px`
 }
 
 function formatLength(length: number) {
