@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
 import * as UTIF from 'utif'
+import { Crop, Download, FolderOpen, Plus, Save } from 'lucide-react'
+import { resampleMicroscopeImage, type ImageCrop } from './imageResampler'
+import { createSession, deleteProject, exportProjectBundle, importProjectBundle, listProjects, saveSession, saveSet, type StoredSession, type StoredSet } from './projectStorage'
+import { ImageProcessingDialog, ProjectLibrary } from './WorkspaceDialogs'
 import { createDetectionPreview, detectClickedObject, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
 import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, swapBoxAxes, type BoxHandle, type OrientedBox } from './boxGeometry'
-import { MAX_SESSION_CSV_BYTES, MAX_SESSION_IMAGE_PIXELS, measurementSetBoxes, measurementSetCsv, parseSessionCsv, rawMeasurementsCsv, sessionCsv, units, type Calibration, type Measurement, type MeasurementSession, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
+import { MAX_SESSION_CSV_BYTES, MAX_SESSION_IMAGE_PIXELS, measurementSetBoxes, measurementSetCsv, parseSessionCsv, rawMeasurementsCsv, units, type Calibration, type Measurement, type MeasurementSession, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
 
 type BoxRectangle = OrientedBox
 type BoxEditorState = { objectId: string; measurementId: number | null; rect: BoxRectangle; nearby?: boolean }
@@ -244,6 +248,17 @@ function App() {
   const pointDetectionRef = useRef(false)
   const lastDetectionPointRef = useRef<Point | null>(null)
   const previewButtonRef = useRef<HTMLButtonElement>(null)
+  const imageLoadEpochRef = useRef(0)
+  const [imageBlob, setImageBlob] = useState<Blob | null>(null)
+  const [savedSessions, setSavedSessions] = useState<StoredSession[]>([])
+  const [savedSets, setSavedSets] = useState<StoredSet[]>([])
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [processingOpen, setProcessingOpen] = useState(false)
+  const [storageReady, setStorageReady] = useState(false)
+  const [storageStatus, setStorageStatus] = useState('')
+  const [setSnapshots, setSetSnapshots] = useState<StoredSession[]>([])
+  const [setId, setSetId] = useState<string>(() => crypto.randomUUID())
+  const [setName, setSetName] = useState('')
   const [language, setLanguage] = useState<Language>(() => {
     const savedLanguage = window.localStorage.getItem('mycrometer-language')
     return savedLanguage && locales[savedLanguage] ? savedLanguage : 'en'
@@ -326,6 +341,33 @@ function App() {
     window.localStorage.setItem('mycrometer-language', language)
     document.documentElement.lang = language
   }, [language])
+
+  useEffect(() => {
+    const storage = navigator.storage
+    if (storage?.persist) void storage.persist().catch(() => false)
+    void listProjects().then((projects) => {
+      setSavedSessions(projects.sessions)
+      setSavedSets(projects.sets)
+    }).catch(() => setStorageStatus('Local storage unavailable')).finally(() => setStorageReady(true))
+  }, [])
+
+  useEffect(() => {
+    if (!storageReady || !imageBlob || !imageSize || !imageId || !calibration) return
+    const record = createSession(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })
+    setStorageStatus('Saving locally')
+    void saveSession(record).then(() => {
+      setSavedSessions((current) => [record, ...current.filter((entry) => entry.id !== record.id)])
+      setStorageStatus('Saved locally')
+    }).catch(() => setStorageStatus('Local save failed. Export a ZIP backup.'))
+  }, [storageReady, imageBlob, imageSize, imageId, imageName, calibration, measurements])
+
+  useEffect(() => {
+    if (!storageReady || !setSnapshots.length) return
+    const record: StoredSet = { id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), sessionIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots }
+    void saveSet(record).then(() => {
+      setSavedSets((current) => [record, ...current.filter((entry) => entry.id !== record.id)])
+    }).catch(() => setStorageStatus('Local save failed. Export a ZIP backup.'))
+  }, [storageReady, setSnapshots, setId, setName, setUnit])
 
   useEffect(() => {
     return () => {
@@ -454,14 +496,25 @@ function App() {
     setStatus(`Restored ${session.measurements.length} measurements${session.calibration ? '' : ' · calibration required'}`)
   }
 
-  const loadImage = (url: string, fileName: string, session?: MeasurementSession | null) => {
+  const loadImage = (url: string, fileName: string, session?: MeasurementSession | null, restoredId?: string, storedBlob?: Blob) => {
+    const epoch = ++imageLoadEpochRef.current
     const image = new Image()
-    image.onload = () => {
+    image.onload = async () => {
+      if (epoch !== imageLoadEpochRef.current) { URL.revokeObjectURL(url); return }
       if (image.naturalWidth <= 0 || image.naturalHeight <= 0 || image.naturalWidth * image.naturalHeight > MAX_SESSION_IMAGE_PIXELS) {
         URL.revokeObjectURL(url)
         setStatus('Image dimensions are invalid or exceed 40 megapixels')
         return
       }
+      let png: Blob
+      try {
+        png = storedBlob ?? await resampleMicroscopeImage(image, { x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight })
+      } catch (error) {
+        URL.revokeObjectURL(url)
+        setStatus(error instanceof Error ? error.message : 'PNG encoding failed')
+        return
+      }
+      if (epoch !== imageLoadEpochRef.current) { URL.revokeObjectURL(url); return }
       detectionEpochRef.current += 1
       measurementGestureRef.current = null
       imageRef.current = image
@@ -470,7 +523,10 @@ function App() {
       lastDetectionPointRef.current = null
       setPreviewOpen(false)
       setImageName(fileName)
-      setImageId(crypto.randomUUID())
+      setImageId(restoredId ?? crypto.randomUUID())
+      setImageBlob(png)
+      setProcessingOpen(false)
+      setPendingImport(null)
       setMeasurements([])
       setBoxEditor(null)
       setCalibration(null)
@@ -491,7 +547,7 @@ function App() {
     }
     image.onerror = () => {
       URL.revokeObjectURL(url)
-      setStatus('That image could not be opened')
+      if (epoch === imageLoadEpochRef.current) setStatus('That image could not be opened')
     }
     image.src = url
   }
@@ -514,6 +570,28 @@ function App() {
   const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? [])
     event.target.value = ''
+    const projectFile = files.find((file) => /\.(zip|myproj)$/i.test(file.name))
+    if (projectFile) {
+      try {
+        const project = await importProjectBundle(projectFile)
+        for (const record of project.sessions) {
+          const image = new Image()
+          const url = URL.createObjectURL(record.imageBlob)
+          try {
+            image.src = url
+            await image.decode()
+            if (image.naturalWidth !== record.metadata.imageWidth || image.naturalHeight !== record.metadata.imageHeight) throw new Error('Project image dimensions do not match')
+          } finally { URL.revokeObjectURL(url) }
+        }
+        for (const record of project.sessions) await saveSession(record)
+        if (project.set) { await saveSet(project.set); openStoredSet(project.set) }
+        else openStoredSession(project.sessions[0])
+        const projects = await listProjects()
+        setSavedSessions(projects.sessions)
+        setSavedSets(projects.sets)
+      } catch (error) { setStatus(error instanceof Error ? error.message : 'Project import failed') }
+      return
+    }
     const csvFile = files.find((file) => /\.csv$/i.test(file.name) || file.type === 'text/csv')
     if (!csvFile) {
       setStatus('Choose a Mycrometer session CSV')
@@ -551,12 +629,16 @@ function App() {
   }
 
   const unloadImage = () => {
+    imageLoadEpochRef.current += 1
+    setImageBlob(null)
+    setProcessingOpen(false)
     detectionEpochRef.current += 1
     measurementGestureRef.current = null
     imageRef.current = null
     setPendingImport(null)
     setImageUrl('')
     setImageName('')
+    setImageId('')
     setImageSize(null)
     setCalibration(null)
     setCalibrationDraft(null)
@@ -788,7 +870,7 @@ function App() {
   }
 
   const saveImageToSet = () => {
-    if (!calibration || !imageSize || !imageId || !measurements.length) return
+    if (!calibration || !imageSize || !imageId || !imageBlob || !measurements.length) return
     const snapshot: MeasurementSetImage = {
       id: imageId,
       imageName,
@@ -800,6 +882,10 @@ function App() {
     setMeasurementSet((current) => current.some((image) => image.id === imageId)
       ? current.map((image) => image.id === imageId ? snapshot : image)
       : [...current, snapshot])
+    const record = createSession(imageId, imageBlob, snapshot)
+    setSetSnapshots((current) => current.some((entry) => entry.id === imageId)
+      ? current.map((entry) => entry.id === imageId ? record : entry)
+      : [...current, record])
     setStatus(`${imageName} saved to measurement set`)
   }
 
@@ -808,9 +894,71 @@ function App() {
     exportCsv(rawMeasurementsCsv(measurements, calibration), `${exportStem}-measurements.csv`)
   }
 
-  const exportSessionCsv = () => {
-    if (!calibration || !measurements.length || !imageSize) return
-    exportCsv(sessionCsv(measurements, calibration, imageName, imageSize), `${exportStem}-session.csv`)
+  const exportProject = async (records: StoredSession[], set?: StoredSet) => {
+    try {
+      const blob = await exportProjectBundle(records, set)
+      const link = document.createElement('a')
+      const url = URL.createObjectURL(blob)
+      link.href = url
+      const name = set ? set.name : records[0].metadata.imageName.replace(/\.[^.]+$/, '')
+      const stem = name.trim().replace(/[^a-z0-9_-]+/gi, '_') || 'mycrometer'
+      link.download = `${stem}-${set ? 'set' : 'session'}.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (error) { setStatus(error instanceof Error ? error.message : 'Project export failed') }
+  }
+
+  const exportActiveSession = () => {
+    if (!imageSize || !imageBlob) return
+    void exportProject([createSession(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })])
+  }
+
+  const activeSet = (): StoredSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), sessionIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots })
+
+  const openStoredSession = (record: StoredSession) => {
+    setLibraryOpen(false)
+    loadImage(URL.createObjectURL(record.imageBlob), record.metadata.imageName, record.metadata, record.id, record.imageBlob)
+  }
+
+  const openStoredSet = (record: StoredSet) => {
+    setSetId(record.id)
+    setSetName(record.name)
+    setSetUnit(record.unit)
+    setSetSnapshots(record.images)
+    setMeasurementSet(record.images.map((entry) => ({ ...entry.metadata, id: entry.id })) as MeasurementSetImage[])
+    if (record.images[0]) openStoredSession(record.images[0])
+    else setLibraryOpen(false)
+  }
+
+  const removeProject = async (id: string, kind: 'session' | 'set') => {
+    if ((kind === 'session' && id === imageId) || (kind === 'set' && id === setId && setSnapshots.length > 0)) return
+    try {
+      await deleteProject(id, kind)
+      if (kind === 'session') setSavedSessions((current) => current.filter((entry) => entry.id !== id))
+      else setSavedSets((current) => current.filter((entry) => entry.id !== id))
+    } catch { setStorageStatus('Could not delete saved project') }
+  }
+
+  const newSet = () => {
+    setSetId(crypto.randomUUID())
+    setSetName('')
+    setSetSnapshots([])
+    setMeasurementSet([])
+  }
+
+  const removeSetImage = (id: string) => {
+    if (setSnapshots.length === 1) { void removeProject(setId, 'set'); return }
+    setSetSnapshots((current) => current.filter((entry) => entry.id !== id))
+    setMeasurementSet((current) => current.filter((entry) => entry.id !== id))
+  }
+
+  const processImage = async (crop: ImageCrop, reduction: number) => {
+    if (!imageRef.current || calibration || measurements.length) return
+    const png = await resampleMicroscopeImage(imageRef.current, crop, reduction)
+    setProcessingOpen(false)
+    loadImage(URL.createObjectURL(png), `${exportStem}-crop.png`, null, undefined, png)
   }
 
   const clearMeasurements = () => {
@@ -901,8 +1049,9 @@ function App() {
         <div className="topbar-actions">
           <span className="offline-indicator"><i />{t('Local workspace')}</span>
             <label className="language-picker"><span>{t('Language')}</span><select aria-label={t('Language')} value={language} onChange={(event) => setLanguage(event.target.value)}>{Object.entries(locales).map(([code, languageLocale]) => <option key={code} value={code}>{languageLocale.languageName}</option>)}</select></label>
-          <button className="button button-quiet" type="button" title={t('Import a session CSV; select its image too to load both at once')} onClick={() => importInputRef.current?.click()}>{t('Import session')}</button>
-          <input ref={importInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,image/*" multiple onChange={handleImport} />
+          <button className="button button-quiet" type="button" onClick={() => setLibraryOpen(true)}><FolderOpen size={16} />{t('Saved projects')}</button>
+          <button className="button button-quiet" type="button" title={t('Import ZIP project or legacy session CSV')} onClick={() => importInputRef.current?.click()}>{t('Import project')}</button>
+          <input ref={importInputRef} className="visually-hidden" type="file" accept=".zip,.myproj,.csv,application/zip,text/csv,image/*" multiple onChange={handleImport} />
           <button className="button button-quiet" type="button" onClick={() => fileInputRef.current?.click()}>{t(imageUrl ? 'Replace image' : 'Open image')}</button>
           {imageUrl && <button className="button button-unload" type="button" title={t('Unload image and clear its measurements')} onClick={unloadImage}><span aria-hidden="true">×</span> {t('Unload')}</button>}
           <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" onChange={handleUpload} />
@@ -939,6 +1088,7 @@ function App() {
             </div>
             <div className="canvas-status"><span className={`tool-dot ${tool}`} />{translateStatus(status, locale)}</div>
             <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>
+            <button className="tool-button" type="button" title={t('Crop and resample before calibration')} aria-label={t('Crop and resample')} disabled={!imageSize || !!calibration || !!measurements.length} onClick={() => setProcessingOpen(true)}><Crop size={17} /></button>
           </div>
           <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
             <span className="eyebrow">{t('MYCOLOGICAL SUMMARY · D1–D9 PERCENTILES')}</span>
@@ -1096,6 +1246,7 @@ function App() {
 
           <section className="overview-section measurement-set-section" aria-labelledby="measurement-set-title">
             <div className="section-title"><span id="measurement-set-title">{t('Measurement set')}</span><span className="overview-n">{t('{count} images · N = {total}', { count: measurementSet.length, total: setBoxes.length })}</span></div>
+            <div className="set-name-field"><input aria-label={t('Set name')} placeholder={t('Set name')} value={setName} onChange={(event) => setSetName(event.target.value)} /><button className="tool-button" type="button" title={t('New set')} aria-label={t('New set')} onClick={newSet}><Plus size={17} /></button></div>
             <button className="button set-save-button" type="button" onClick={saveImageToSet} disabled={!calibration || !measurements.length}>
               <span aria-hidden="true">{currentImageInSet ? '↻' : '+'}</span> {t(currentImageInSet ? 'Update image in set' : 'Add image to set')}
             </button>
@@ -1103,8 +1254,8 @@ function App() {
               <ul className="set-image-list" aria-label={t('Images in measurement set')}>
                 {measurementSet.map((image) => (
                   <li key={image.id}>
-                    <span className="set-image-detail"><strong title={image.imageName}>{image.imageName}</strong><small>{t('{count} measurements · {pixelsPerUnit} px/{unit}{currentImage}', { count: image.measurements.length, pixelsPerUnit: image.calibration.pixelsPerUnit.toFixed(2), unit: image.calibration.unit, currentImage: image.id === imageId ? t('current image') : '' })}</small></span>
-                    <button className="remove-button" type="button" title={t('Remove {imageName} from set', { imageName: image.imageName })} aria-label={t('Remove {imageName} from set', { imageName: image.imageName })} onClick={() => setMeasurementSet((current) => current.filter((entry) => entry.id !== image.id))}>×</button>
+                    <button className="set-image-detail set-image-open" type="button" onClick={() => { const record = setSnapshots.find((entry) => entry.id === image.id); if (record) openStoredSession(record) }}><strong title={image.imageName}>{image.imageName}</strong><small>{t('{count} measurements · {pixelsPerUnit} px/{unit}{currentImage}', { count: image.measurements.length, pixelsPerUnit: image.calibration.pixelsPerUnit.toFixed(2), unit: image.calibration.unit, currentImage: image.id === imageId ? t('current image') : '' })}</small></button>
+                    <button className="remove-button" type="button" title={setSnapshots.length === 1 ? t('Open project cannot be deleted. Open another project first.') : t('Remove {imageName} from set', { imageName: image.imageName })} aria-label={setSnapshots.length === 1 ? t('Open project cannot be deleted. Open another project first.') : t('Remove {imageName} from set', { imageName: image.imageName })} disabled={setSnapshots.length === 1} onClick={() => removeSetImage(image.id)}>×</button>
                   </li>
                 ))}
               </ul>
@@ -1117,8 +1268,9 @@ function App() {
               </div>
               {setBoxes.length > 0 && <p className="set-summary">{formatMycologicalRange(setLengthStats)} × {formatMycologicalRange(setWidthStats)} {setUnit}, Q = {formatMycologicalNumber(setQStats.min)}–{formatMycologicalNumber(setQStats.max)}; N = {setBoxes.length}, Me = {formatMycologicalMedian(setLengthStats.median)} × {formatMycologicalMedian(setWidthStats.median)} {setUnit}; Qe = {formatMycologicalMedian(setQStats.median)}</p>}
               <div className="set-actions">
+                <button className="text-button" type="button" onClick={() => { const record = activeSet(); void exportProject(record.images, record) }}><Download size={14} />{t('Export set')}</button>
                 <button className="text-button" type="button" title={t('Combined measurement values with source image names; not a session file')} onClick={() => exportCsv(measurementSetCsv(measurementSet, setUnit), 'mycrometer-set.csv')}>{t('Export set CSV')}</button>
-                <button className="text-button" type="button" onClick={() => setMeasurementSet([])}>{t('Clear set')}</button>
+                <button className="text-button" type="button" title={t('Open project cannot be deleted. Open another project first.')} disabled={setSnapshots.length > 0} onClick={() => { void removeProject(setId, 'set') }}>{t('Clear set')}</button>
               </div>
               <div className="summary-line set-total"><span>{t('Set measurements')}</span><strong>{setMeasurementCount}</strong></div>
             </>}
@@ -1126,11 +1278,15 @@ function App() {
 
           <div className="panel-bottom">
             <div className="summary-line"><span>{t('Total measurements')}</span><strong>{measurements.length}</strong></div>
-            <button className="button button-export" type="button" onClick={exportSessionCsv} disabled={!calibration || !measurements.length} title={t('CSV with calibration and box geometry for re-import')}><span aria-hidden="true">↓</span> {t('Export session')}</button>
+            <button className="button button-export" type="button" onClick={exportActiveSession} disabled={!imageBlob} title={t('ZIP with PNG image, calibration, geometry and CSV')}><Download size={16} /> {t('Export session')}</button>
+            <div className="storage-status" role="status"><Save size={13} />{t(imageBlob && !calibration ? 'Not saved - calibration required' : storageStatus)}</div>
+            <p className="storage-warning">{t('Browser storage can be cleared. Export a ZIP backup to keep a separate copy.')}</p>
             <p className="privacy-note"><span aria-hidden="true">◈</span> {t('Images stay on this device')}</p>
           </div>
         </aside>
       </section>
+      {libraryOpen && <ProjectLibrary sessions={savedSessions} sets={savedSets} activeSessionId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredSession} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
+      {processingOpen && imageRef.current && <ImageProcessingDialog image={imageRef.current} onApply={processImage} onClose={() => setProcessingOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
         {detectionNotice && detectionNotice.imageUrl === imageUrl && <>
           <strong>{t('No object found')}</strong>
@@ -1716,8 +1872,7 @@ export function formatBoxDimensionsText(width: number, height: number, calibrati
 
 function formatLength(length: number) {
   if (length >= 100) return length.toFixed(1)
-  if (length >= 10) return length.toFixed(2)
-  return length.toFixed(3)
+  return length.toFixed(2)
 }
 
 export default App

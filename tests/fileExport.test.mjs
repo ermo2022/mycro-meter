@@ -82,3 +82,40 @@ test('browsers without Save As retain CSV downloads and filenames', async () => 
   assert.equal(fixture.downloadBlob.type, 'text/csv')
   assert.deepEqual(fixture.revokedUrls, ['blob:csv'])
 })
+
+test('ZIP export retains every word of set names and sanitizes filesystem characters', async () => {
+  let declaration
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'exportProject') declaration = node
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert.ok(declaration?.initializer)
+  const { outputText } = ts.transpileModule(`const exportProject = ${declaration.initializer.getText(source)}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  })
+  const downloads = []
+  const document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() { downloads.push(this.download) }, remove() {} }),
+  }
+  const exportProject = new Function('exportProjectBundle', 'document', 'URL', 'window', 'setStatus', `${outputText}; return exportProject`)(
+    async () => new Blob(['zip']), document,
+    { createObjectURL: () => 'blob:zip', revokeObjectURL() {} },
+    { setTimeout: callback => callback() },
+    message => assert.fail(message),
+  )
+  const records = [{ metadata: { imageName: 'Slide 1. Field notes.tiff' } }]
+  for (const [name, expected] of [
+    ['Sample one field two', 'Sample_one_field_two-set.zip'],
+    ['Sample 1. Field notes', 'Sample_1_Field_notes-set.zip'],
+    ['  Sample   one\tfield two  ', 'Sample_one_field_two-set.zip'],
+    ['Sample/one:field?two', 'Sample_one_field_two-set.zip'],
+    ['   ', 'mycrometer-set.zip'],
+  ]) {
+    await exportProject(records, { name })
+    assert.equal(downloads.at(-1), expected)
+  }
+  await exportProject(records)
+  assert.equal(downloads.at(-1), 'Slide_1_Field_notes-session.zip')
+})

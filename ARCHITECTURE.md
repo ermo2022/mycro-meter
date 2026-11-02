@@ -14,6 +14,9 @@ Browser
         src/objectDetection.ts   Finds image contours using lazily loaded OpenCV.js
         src/boxGeometry.ts       Calculates and edits rotated measurement boxes
         src/measurementCsv.ts    Defines measurement data and reads/writes CSV
+        src/imageResampler.ts    Validates crop/scale bounds and encodes lossless PNGs
+        src/projectStorage.ts    IndexedDB persistence and portable ZIP projects
+        src/WorkspaceDialogs.tsx Project library and image-processing dialogs
         src/locales/*.json       UI messages and status translations per language
         src/style.css            Layout and visual styling
   public/sw.js                   Caches the application shell and same-origin assets
@@ -31,6 +34,9 @@ Browser
 | `src/boxGeometry.ts` | Pure geometry operations for oriented boxes, such as corners, resizing, rotating, hit testing, and keeping a box within the image. It does not depend on the UI. |
 | `src/objectDetection.ts` | Converts an image or image region to pixels, runs OpenCV thresholding and contour detection, and maps detected boxes back to source-image coordinates. |
 | `src/measurementCsv.ts` | Measurement/session data definitions, unit conversion for sets, CSV export, and validation/parsing of imported session CSV files. |
+| `src/imageResampler.ts` | Native-resolution PNG normalization and explicit pre-calibration crop/resampling, limited to 1.5x reduction with high-quality interpolation and uniform scaling. |
+| `src/projectStorage.ts` | IndexedDB-only localforage stores, serialized writes, session/set snapshots, bounded archive validation, and lazily loaded JSZip STORE exports/imports. |
+| `src/WorkspaceDialogs.tsx` | Native modal dialogs for browsing saved projects and previewing an image crop with draggable or numeric selection. |
 | `src/locales/*.json` | UI translations. Each locale file is named with its language code and contains a native `languageName`, `messages`, `statuses`, and `statusTemplates`. Vite discovers these files automatically. |
 | `src/style.css` | Application and responsive layout styling. |
 | `src/utif.d.ts` | TypeScript declaration that lets the project use the UTIF library. It describes the library to the compiler; it is not the TIFF decoder itself. |
@@ -87,7 +93,7 @@ The detection preview dialog shares the initial click crop and processing pipeli
 
 The image canvas is redrawn from current state. It draws the loaded image, saved measurements, and temporary interaction drafts. The user can select a saved box and resize or rotate it; the geometry helpers keep those operations in image coordinates and constrain the result to the image. Accepting a new draft adds it to the list; canceling a draft leaves saved measurements untouched.
 
-The current image summary is calculated in `App.tsx` from box length, width, and Q (length divided by width). A measurement set stores per-image snapshots in memory and converts their physical values into the selected common unit before computing pooled summaries.
+The current image summary is calculated in `App.tsx` from box length, width, and Q (length divided by width). A measurement set stores per-image snapshots in React state and IndexedDB and converts their physical values into the selected common unit before computing pooled summaries. Set snapshots include their PNG blobs independently of the current session, so edits or deletion of that session do not change a saved set.
 
 ### CSV And Persistence
 
@@ -99,7 +105,13 @@ The current image summary is calculated in `App.tsx` from box length, width, and
 
 Session import validates the header, row values, units, image dimensions, and configured size limits before reconstructing measurements. The app matches the session to an image by name and dimensions; the image itself is selected separately because browsers do not let a web page reopen a user's local file by its path.
 
-There is no automatic persistent measurement database. Current measurements and measurement-set snapshots live in memory and are lost on refresh or when the page closes. Export session CSVs to retain editable geometry. The service worker caches application files for offline use, not user images or measurement data.
+`projectStorage.ts` uses localforage configured for IndexedDB only, with `sessions_store` and `sets_store` in the `mycrometer` database. Each session stores its ID, timestamp, normalized PNG blob, structured session metadata, and CSV. Each named set stores its unit, session IDs, and independent image/metadata/CSV snapshots. Writes are serialized; React effects save accepted measurements, calibration, and set changes automatically. Both the autosave effect and storage function require calibration before persisting a session, so uncalibrated images and imports remain temporary. Existing saved entries are not removed by this policy. Quota or availability failures are shown in the UI rather than falling back to localStorage. The project library loads saved sessions and sets, and supports explicit deletion. Entry sizes are estimates combining PNG blob bytes and UTF-8 JSON/CSV data, including each set's snapshots; browsers do not expose exact per-record disk usage.
+
+All images are normalized at native dimensions by default. Before calibration, users can explicitly crop and reduce resolution by at most 1.5x. Canvas interpolation is high quality and PNG encoding is lossless, but resampling itself is not. Uniform scaling avoids aspect distortion from integer output rounding. Applying a crop starts a new temporary session with no calibration or measurements; coordinates thereafter belong to that processed PNG. Neither the uncalibrated original nor its crop is automatically stored until calibration succeeds. TIFF first-page conversion preserves its original pixel dimensions.
+
+Session/set exports are uncompressed ZIP archives containing a versioned `project_manifest.json`, per-item JSON metadata, CSV and PNG, and an additional combined CSV for sets. Import checks schema, units, finite geometry, item paths, duplicates, image headers/dimensions, and archive size limits before returning records with new IDs. `App.tsx` additionally decodes every image before writing imports. JSON is authoritative for empty sessions, which have no CSV data rows. Legacy CSV import still matches a separately selected image by name and dimensions.
+
+IndexedDB data belongs to a browser profile and origin and is subject to browser eviction, storage quotas, private-mode restrictions, and explicit clearing. ZIP exports are portable backups. The service worker caches application files for offline use, not user images or measurement data; IndexedDB provides offline access to saved projects.
 
 ## Development And Safe Change Points
 
