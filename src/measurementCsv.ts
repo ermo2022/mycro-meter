@@ -24,6 +24,47 @@ export type MeasurementSetImage = MeasurementSession & { id: string; calibration
 
 const micrometresPerUnit: Record<Unit, number> = { 'µm': 1, mm: 1000, nm: 0.001 }
 
+export function validateMeasurementSession(value: unknown): asserts value is MeasurementSession {
+  if (!value || typeof value !== 'object') throw new Error('Invalid session metadata')
+  const metadata = value as MeasurementSession
+  const positive = (number: unknown) => typeof number === 'number' && Number.isFinite(number) && number > 0
+  const point = (value: unknown) => {
+    if (!value || typeof value !== 'object') return false
+    const coordinate = value as Point
+    return Number.isFinite(coordinate.x) && Number.isFinite(coordinate.y) && coordinate.x >= 0 && coordinate.y >= 0 &&
+      coordinate.x <= metadata.imageWidth && coordinate.y <= metadata.imageHeight
+  }
+  if (typeof metadata.imageName !== 'string' || metadata.imageName.length > 1024 ||
+    !Number.isInteger(metadata.imageWidth) || !positive(metadata.imageWidth) ||
+    !Number.isInteger(metadata.imageHeight) || !positive(metadata.imageHeight) ||
+    metadata.imageWidth * metadata.imageHeight > MAX_SESSION_IMAGE_PIXELS ||
+    !Array.isArray(metadata.measurements) || metadata.measurements.length > MAX_SESSION_MEASUREMENTS ||
+    (metadata.calibration !== null && (!metadata.calibration || !positive(metadata.calibration.pixelsPerUnit) || !units.includes(metadata.calibration.unit)))) {
+    throw new Error('Invalid session dimensions, calibration, or measurements')
+  }
+  const ids = new Set<number>()
+  for (const measurement of metadata.measurements) {
+    if (!measurement || !Number.isSafeInteger(measurement.id) || ids.has(measurement.id) ||
+      typeof measurement.name !== 'string' || measurement.name.length > 1024) {
+      throw new Error('Invalid measurement identity')
+    }
+    ids.add(measurement.id)
+    if (measurement.kind === 'distance') {
+      if (!point(measurement.start) || !point(measurement.end) || !positive(measurement.pixels) ||
+        Math.abs(Math.hypot(measurement.end.x - measurement.start.x, measurement.end.y - measurement.start.y) - measurement.pixels) > 0.0001) {
+        throw new Error('Invalid distance geometry')
+      }
+    } else if (measurement.kind === 'box') {
+      const box = measurement.rect
+      if (!box || typeof measurement.objectId !== 'string' || measurement.objectId.length > 1024 || !point({ x: box.centerX, y: box.centerY }) ||
+        !positive(box.width) || !positive(box.height) || !Number.isFinite(box.angle) ||
+        box.width > Math.hypot(metadata.imageWidth, metadata.imageHeight) || box.height > Math.hypot(metadata.imageWidth, metadata.imageHeight)) {
+        throw new Error('Invalid box geometry')
+      }
+    } else throw new Error('Unknown measurement type')
+  }
+}
+
 function calibrationInUnit(calibration: Calibration, unit: Unit): Calibration {
   return {
     pixelsPerUnit: calibration.pixelsPerUnit * micrometresPerUnit[unit] / micrometresPerUnit[calibration.unit],
@@ -201,5 +242,7 @@ export function parseSessionCsv(text: string): MeasurementSession {
     }
   })
 
-  return { imageName: unescapeText(first.text('Image')), imageWidth, imageHeight, calibration, measurements }
+  const session = { imageName: unescapeText(first.text('Image')), imageWidth, imageHeight, calibration, measurements }
+  validateMeasurementSession(session)
+  return session
 }

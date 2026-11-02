@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'mycrometer-shell-'
-const CACHE_NAME = `${CACHE_PREFIX}v2`
+const CACHE_NAME = `${CACHE_PREFIX}v3`
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './mycrometer.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png']
 
 self.addEventListener('install', (event) => {
@@ -29,7 +29,7 @@ self.addEventListener('fetch', (event) => {
         }
         return response
       } catch {
-        const cached = await cache.match(event.request)
+        const cached = await cache.match(event.request, { ignoreVary: true })
         return cached ?? (event.request.mode === 'navigate' ? cache.match('./index.html') : Response.error())
       }
     })(),

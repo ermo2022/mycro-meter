@@ -14,7 +14,9 @@ Try the [latest hosted version on GitHub Pages](https://ermo2022.github.io/mycro
 - Summarize spore length, width, and Q with mean ± sample SD and D1–D9 percentile ranges, including the number of boxes used.
 - After calibration, draw manual measurement boxes and refine their rotation and dimensions.
 - Zoom, pan, undo, remove individual measurements, clear the list, and export measurements as CSV.
-- Export a session CSV (calibration, image name/size, and box geometry) and import it later to redraw the measurements on the same image.
+- Optionally crop and resample before calibration, using lossless PNG encoding, high-quality interpolation, and at most 1.5x scale reduction. Native resolution is the default.
+- After successful calibration, automatically save images, calibration, editable geometry, and CSV data together in IndexedDB. Reopen them from **Saved projects** without selecting the image again; each session and set shows its estimated storage size.
+- Export/import individual sessions or named multi-image sets as uncompressed ZIP projects containing readable JSON, CSV, and PNG files. Legacy session CSV imports remain supported.
 - Combine calibrated measurements from multiple images in a measurement set, with pooled statistics, unit conversion, and a combined CSV export.
 - Install as a PWA and use the app shell offline after the first online visit.
 - Switch the interface between English and Dutch; the selected language is remembered on this device.
@@ -26,9 +28,15 @@ Try the [latest hosted version on GitHub Pages](https://ermo2022.github.io/mycro
 3. Enter its real-world length and unit, then choose **Set scale**. Recalibration preserves measurements and updates their physical values from the original pixel geometry.
 4. In **Measure object** mode, click an object to detect a single box around it. The detector searches near the click, tries dark and bright foregrounds automatically, and expands its temporary crop when needed. There are no persistent detection areas or candidate lists. Drag instead of clicking to draw a manual box.
 5. Refine the initial box's edges or corners and rotate it with the round handle, then choose **Accept dimensions**. The box is only a draft until accepted: **Cancel**, Escape, or closing the editor removes it without adding a measurement. After acceptance, measure mode stays active for the next object. Use the select tool to edit a saved box on the image, or click a measurement in the list. Canceling an existing measurement edit preserves the saved measurement. Use the row's swap control to exchange length and width (the summary, Q, and exports follow the swap). Clear measurements explicitly when finished, or load a new image to reset the workspace.
-6. Export the measurements from the analysis panel when ready. **Export CSV** writes only length/width values; **Export session** also stores calibration and geometry. Use **Import session** and select the session CSV together with its image (or pick the image when prompted) to restore the measurements.
+6. Once you set a valid calibration, the image and accepted measurement changes save locally automatically; check the save status beneath **Export session**. Opening or cropping an image does not save it before calibration. Uncalibrated ZIP imports also remain temporary until calibrated. Use **Saved projects** to reopen a session after refreshing or closing the app. Each session and set displays an estimated size for its PNG images and serialized metadata/CSV; browser database overhead, compression, and deduplication are not reflected. **Export CSV** remains available for spreadsheet values. **Export session** downloads a ZIP containing the image, calibration, geometry, and CSV. **Import project** restores session/set ZIPs, or accepts legacy session CSVs together with their images.
 
-Calibration is required before detection, measurement changes, or export. Calibration applies to all measurements for the current image. Loading a new image requires a new calibration. Imported sessions with a saved scale restore it automatically; sessions without one retain their measurements but require calibration before continuing.
+Before calibration, the crop icon beside **Fit view** opens a preview with a draggable crop and exact pixel fields. Draw a selection, drag its edges or corners to resize it, or drag inside to reposition it. Handles also support arrow keys (Shift for 10-pixel steps). Choose a reduction factor from 1 to 1.5; encoding is PNG with high-quality interpolation. Resampling changes image detail even though PNG encoding is lossless. Rounded output dimensions use uniform scaling to avoid stretching, clipping at most a fractional pixel at the output edge. Applying a crop creates a new temporary session, saved only after successful calibration; the uncalibrated original is not automatically stored. Calibration and measurements then use the processed image's pixel coordinates. Cropping is disabled after calibration or recording measurements to prevent invalidating existing geometry.
+
+Calibration is required before detection, measurement changes, or values-only CSV export. Session ZIPs can also save empty or uncalibrated images. Calibration applies to all measurements for the current image. Loading a new image requires a new calibration. Imported sessions with a saved scale restore it automatically; sessions without one retain their measurements but require calibration before continuing.
+
+Local saves belong to the current browser profile and site address. Private browsing, clearing site data, browser eviction, or storage limits can remove or prevent saves. Export ZIP backups for portability and long-term retention; no images are uploaded. Projects are limited to 100 images and 128 MiB (including expanded contents on import), with PNG files up to 128 MiB. Imported PNGs are checked against metadata and decoded before saving. Unsupported or malformed projects are rejected; imports receive new IDs rather than overwriting existing projects.
+
+ZIP projects contain `project_manifest.json` and one `items/item_001/` directory per image, each with `metadata.json`, `measurements.csv`, and `image.png`. Set projects also contain a combined top-level `measurements.csv`. Ordinary archive, image, and text tools can recover these files without Mycrometer. ZIP downloads use the browser's normal download destination.
 
 All CSV exports open a **Save As** dialog to choose a folder and filename in supported browsers, such as desktop Chrome and Edge, over HTTPS or localhost. The browser can remember the last export folder. Canceling the dialog does not download anything. On mobile and browsers without this capability, exports use the browser's normal download behavior; its download settings determine the destination.
 
@@ -58,7 +66,7 @@ The mycological summary above the image displays D1–D9 dimensional ranges, wit
 
 Adding an image saves a snapshot of its measurements and calibration. After editing or recalibrating the current image, choose **Update image in set** to replace that snapshot without duplicating it. Loading or unloading an image, clearing its measurements, or importing another session does not change saved snapshots. Remove individual images from the set or choose **Clear set** to discard the set explicitly. Reopening an image as a new load creates a separate set entry, even if the filename is the same.
 
-Sets stay in memory for the current browser session and are lost on refresh or closing the page. Export before leaving. The combined CSV contains measurement values, not a restorable multi-image session; use individual **Export session** files to retain editable geometry for each image. Current-image exports still require calibration, but saved set values can be exported while the next image awaits calibration.
+Sets and their image snapshots save automatically in IndexedDB. Give a set a name, use **New set** to begin another without deleting the previous set, and reopen saved sets from the **Sets** tab in **Saved projects**. Click an image within a set to reopen its saved snapshot. **Export set** bundles every snapshot with its PNG image, calibration, editable geometry, and combined CSV; **Import project** restores the whole set. **Export set CSV** still provides spreadsheet values only. **Clear set** deletes the active saved set but keeps individual sessions. Deleting a session does not remove its snapshot from a saved set.
 
 ## Development
 
@@ -81,6 +89,8 @@ Create and preview a production build:
 npm run build
 npm run preview
 ```
+
+Run the geometry, export, image-processing, and IndexedDB/ZIP round-trip tests with `npm test`.
 
 ## Install on a phone
 
