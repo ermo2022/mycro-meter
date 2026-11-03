@@ -116,8 +116,7 @@ export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onR
   const [error, setError] = useState('')
   let output: { width: number; height: number } | null = null
   try { output = imageProcessingSize(image.naturalWidth, image.naturalHeight, crop, reduction) } catch {}
-  return <section className="image-processing-panel" aria-labelledby="crop-panel-title">
-    <div className="section-title"><span id="crop-panel-title">{t('Crop and resample')}</span></div>
+  return <section className="image-processing-panel" aria-label={t('Crop and resample')}>
     <form className="image-processing-form" onSubmit={(event) => {
       event.preventDefault()
       if (!output || busy) return
