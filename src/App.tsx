@@ -920,6 +920,15 @@ function App() {
 
   const activeSet = (): StoredSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), sessionIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots })
 
+  const exportActiveProject = () => {
+    if (!setSnapshots.length) {
+      exportActiveSession()
+      return
+    }
+    const record = activeSet()
+    void exportProject(record.images, record)
+  }
+
   const openStoredSession = (record: StoredSession) => {
     setLibraryOpen(false)
     loadImage(URL.createObjectURL(record.imageBlob), record.metadata.imageName, record.metadata, record.id, record.imageBlob)
@@ -1279,8 +1288,11 @@ function App() {
           </section>
 
           <div className="panel-bottom">
-            <div className="summary-line"><span>{t('Total measurements')}</span><strong>{measurements.length}</strong></div>
-            <button className="button button-export" type="button" onClick={exportActiveSession} disabled={!imageBlob} title={t('ZIP with PNG image, calibration, geometry and CSV')}><Download size={16} /> {t('Export session')}</button>
+            <div className="summary-line"><span>{t(setSnapshots.length ? 'Set measurements' : 'Total measurements')}</span><strong>{setSnapshots.length ? setMeasurementCount : measurements.length}</strong></div>
+            <div className="project-export-actions">
+              <button className="button button-export" type="button" onClick={exportActiveProject} disabled={!setSnapshots.length && !imageBlob} title={t(setSnapshots.length ? 'ZIP with all set images, calibrations, geometry and CSV' : 'ZIP with PNG image, calibration, geometry and CSV')}><Download size={16} /> {t(setSnapshots.length ? 'Export set' : 'Export session')}</button>
+              {setSnapshots.length > 0 && <button className="text-button" type="button" onClick={exportActiveSession} disabled={!imageBlob} title={t('ZIP with PNG image, calibration, geometry and CSV')}><Download size={14} />{t('Export current session')}</button>}
+            </div>
             <div className="storage-status" role="status"><Save size={13} />{t(imageBlob && !calibration ? 'Not saved - calibration required' : storageStatus)}</div>
             <p className="storage-warning">{t('Browser storage can be cleared. Export a ZIP backup to keep a separate copy.')}</p>
             <p className="privacy-note"><span aria-hidden="true">◈</span> {t('Images stay on this device')}</p>

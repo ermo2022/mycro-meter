@@ -159,6 +159,8 @@
     "Total measurements": "Totaal aantal metingen",
     "CSV with calibration and box geometry for re-import": "CSV met kalibratie en meetpunten om te importereb",
     "Export session": "Sessie exporteren",
+    "Export current session": "Huidige sessie exporteren",
+    "ZIP with all set images, calibrations, geometry and CSV": "ZIP met alle setafbeeldingen, kalibraties, geometrie en CSV",
     "Images stay on this device": "Afbeeldingen blijven op dit apparaat",
     "No object found": "Geen object gevonden",
     "Drag on the image to draw a manual box.": "Sleep over de afbeelding om handmatig een omkadering te tekenen.",

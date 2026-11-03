@@ -159,6 +159,8 @@
     "Total measurements": "Total measurements",
     "CSV with calibration and box geometry for re-import": "CSV with calibration and box geometry for re-import",
     "Export session": "Export session",
+    "Export current session": "Export current session",
+    "ZIP with all set images, calibrations, geometry and CSV": "ZIP with all set images, calibrations, geometry and CSV",
     "Images stay on this device": "Images stay on this device",
     "No object found": "No object found",
     "Drag on the image to draw a manual box.": "Drag on the image to draw a manual box.",

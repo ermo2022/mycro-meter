@@ -119,3 +119,30 @@ test('ZIP export retains every word of set names and sanitizes filesystem charac
   await exportProject(records)
   assert.equal(downloads.at(-1), 'Slide_1_Field_notes-session.zip')
 })
+
+test('primary project export selects the complete active set or the current session without a set', () => {
+  let declaration
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'exportActiveProject') declaration = node
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert.ok(declaration?.initializer)
+  const { outputText } = ts.transpileModule(`const exportActiveProject = ${declaration.initializer.getText(source)}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  })
+  for (const images of [[], [{ id: 'first' }], [{ id: 'first' }, { id: 'second' }]]) {
+    let sessionExports = 0
+    const projectExports = []
+    const set = { name: 'Named set', images }
+    const exportActiveProject = new Function('setSnapshots', 'exportActiveSession', 'activeSet', 'exportProject', `${outputText}; return exportActiveProject`)(
+      images,
+      () => { sessionExports += 1 },
+      () => set,
+      (...args) => { projectExports.push(args) },
+    )
+    exportActiveProject()
+    assert.equal(sessionExports, images.length ? 0 : 1)
+    assert.deepEqual(projectExports, images.length ? [[images, set]] : [])
+  }
+})
