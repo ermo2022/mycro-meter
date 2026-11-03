@@ -93,7 +93,14 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 }
 @media (max-width: 560px) {
   .app-shell .topbar-actions { width: 100%; justify-content: flex-start; }
-  .crop-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .crop-fields { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+  .crop-fields label { gap: 3px; font-size: 10px; }
+  .crop-fields input { min-height: 32px; padding: 4px 5px; font-size: 11px; }
+  .workspace.is-cropping { grid-template-rows: 44px minmax(180px, 30vh) auto; }
+  .image-processing-panel { padding: 8px 12px; }
+  .image-processing-panel .image-processing-form { gap: 8px; padding-top: 8px; }
+  .image-processing-panel .detection-field { gap: 4px; margin-top: 4px; }
+  .image-processing-panel .project-form-actions { justify-content: space-between; gap: 6px; }
   .project-thumbnail { width: 48px; height: 40px; flex-basis: 48px; }
 }
 .app-shell { display: flex; flex-direction: column; min-height: 100vh; background: var(--paper); }

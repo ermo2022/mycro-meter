@@ -1154,7 +1154,7 @@ function App() {
         </div>
       </header>
 
-      <section className="workspace">
+      <section className={`workspace ${processingOpen ? 'is-cropping' : ''}`}>
         <aside className="tool-rail" aria-label={t('Tools')}>
           {imageSize && <div className="rail-group">
             {calibration && <button className={`tool-button ${tool === 'measure' ? 'is-active' : ''}`} type="button" title={t('Measure object')} aria-label={t('Measure object')} disabled={!calibration} onClick={() => { setTool('measure'); setCalibrationDraft(null); setManualStart(null); setManualDraft(null) }}><span className="tool-glyph box-glyph" /></button>}
