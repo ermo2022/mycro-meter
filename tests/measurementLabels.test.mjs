@@ -30,3 +30,9 @@ test('box labels omit angle but keep width and height', () => {
   assert.equal(formatBoxDimensionsText(120, 80, { pixelsPerUnit: 10, unit: 'mm' }), '12.00 × 8.000 mm')
   assert.equal(formatBoxDimensionsText(120, 80), '120 × 80 px')
 })
+
+test('box labels automatically report the longer dimension first', () => {
+  const formatBoxDimensionsText = formatBoxDimensionsTextFactory()
+  assert.equal(formatBoxDimensionsText(80, 120, { pixelsPerUnit: 10, unit: 'mm' }), '12.00 × 8.000 mm')
+  assert.equal(formatBoxDimensionsText(80, 120), '120 × 80 px')
+})

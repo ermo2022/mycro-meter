@@ -21,7 +21,8 @@ function load(name) {
   return module.exports
 }
 const storage = load('./projectStorage')
-const { parseSessionCsv, sessionCsv } = load('./measurementCsv')
+const { measurementSetBoxes, measurementSetCsv, parseSessionCsv, rawMeasurementsCsv, sessionCsv } = load('./measurementCsv')
+const { boxCorners, longAxisFirst } = load('./boxGeometry')
 const { adjustImageCrop, imageProcessingSize, resampleMicroscopeImage } = load('./imageResampler')
 const JSZip = require('jszip')
 const metadata = {
@@ -33,6 +34,27 @@ const header = new Uint8Array(33)
 const view = new DataView(header.buffer)
 for (const [offset, value] of [[0, 0x89504e47], [4, 0x0d0a1a0a], [8, 13], [12, 0x49484452], [16, 100], [20, 80]]) view.setUint32(offset, value)
 const image = new Blob([header], { type: 'image/png' })
+
+test('box dimensions automatically use the long axis in summaries and CSV without moving the box', () => {
+  for (const [width, height] of [[10, 20], [20, 10], [10, 10], [0.25, 0.5]]) {
+    const measurement = { ...metadata.measurements[0], rect: { ...metadata.measurements[0].rect, width, height } }
+    const normalized = longAxisFirst(measurement.rect)
+    for (const corner of boxCorners(measurement.rect)) {
+      assert.ok(boxCorners(normalized).some(candidate => Math.hypot(candidate.x - corner.x, candidate.y - corner.y) < 1e-8))
+    }
+    const length = Math.max(width, height)
+    const breadth = Math.min(width, height)
+    const entry = { ...metadata, id: 'axes-test', measurements: [measurement] }
+    assert.deepEqual(measurementSetBoxes([entry], 'mm'), [{ length: length / 4, width: breadth / 4, q: length / breadth }])
+    const fields = `"${length / 4}","${breadth / 4}","${(length / breadth).toFixed(4)}","mm","${length}","${breadth}","${normalized.angle}"`
+    assert.ok(rawMeasurementsCsv([measurement], metadata.calibration).includes(fields))
+    assert.ok(measurementSetCsv([entry], 'mm').includes(fields))
+    const restored = parseSessionCsv(sessionCsv([measurement], metadata.calibration, metadata.imageName, { x: 100, y: 80 }))
+    assert.deepEqual(restored.measurements[0].rect, normalized)
+    assert.equal(measurement.rect.width, width)
+    assert.equal(measurement.rect.height, height)
+  }
+})
 
 test('crop bounds and lossless size policy enforce a maximum 1.5x reduction', () => {
   assert.deepEqual(imageProcessingSize(6000, 4000, { x: 100, y: 200, width: 3000, height: 1800 }, 1.5), { width: 2000, height: 1200 })

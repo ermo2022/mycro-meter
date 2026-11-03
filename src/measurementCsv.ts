@@ -1,4 +1,4 @@
-import { normalizeOrientedBox, type OrientedBox } from './boxGeometry'
+import { longAxisFirst, normalizeOrientedBox, type OrientedBox } from './boxGeometry'
 
 export type Point = { x: number; y: number }
 export type Measurement =
@@ -77,8 +77,8 @@ export function measurementSetBoxes(images: MeasurementSetImage[], unit: Unit) {
     const calibration = calibrationInUnit(image.calibration, unit)
     return image.measurements.flatMap((measurement) => {
       if (measurement.kind !== 'box') return []
-      const box = normalizeOrientedBox(measurement.rect)
-      return [{ length: box.width / calibration.pixelsPerUnit, width: box.height / calibration.pixelsPerUnit, q: box.width / Math.max(1, box.height) }]
+      const box = longAxisFirst(measurement.rect)
+      return [{ length: box.width / calibration.pixelsPerUnit, width: box.height / calibration.pixelsPerUnit, q: box.width / box.height }]
     })
   })
 }
@@ -92,8 +92,8 @@ function rawFields(item: Measurement, calibration: Calibration | null): string[]
   if (item.kind === 'distance') {
     return [item.name, 'Distance', String(item.pixels / pixelsPerUnit), '', '', unit, String(item.pixels), '', '']
   }
-  const { width, height, angle } = normalizeOrientedBox(item.rect)
-  const q = width / Math.max(1, height)
+  const { width, height, angle } = longAxisFirst(item.rect)
+  const q = width / height
   return [item.name, 'Box', String(width / pixelsPerUnit), String(height / pixelsPerUnit), q.toFixed(4), unit, String(width), String(height), String(angle)]
 }
 

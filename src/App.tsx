@@ -5,7 +5,7 @@ import { resampleMicroscopeImage, type ImageCrop } from './imageResampler'
 import { createSession, deleteProject, exportProjectBundle, importProjectBundle, listProjects, saveSession, saveSet, type StoredSession, type StoredSet } from './projectStorage'
 import { ImageProcessingDialog, ProjectLibrary } from './WorkspaceDialogs'
 import { createDetectionPreview, detectClickedObject, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
-import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, swapBoxAxes, type BoxHandle, type OrientedBox } from './boxGeometry'
+import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, type BoxHandle, type OrientedBox } from './boxGeometry'
 import { MAX_SESSION_CSV_BYTES, MAX_SESSION_IMAGE_PIXELS, measurementSetBoxes, measurementSetCsv, parseSessionCsv, rawMeasurementsCsv, units, type Calibration, type Measurement, type MeasurementSession, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
 
 type BoxRectangle = OrientedBox
@@ -152,15 +152,18 @@ function clampZoom(value: number) {
 const micrometresPerUnit: Record<Unit, number> = { 'µm': 1, mm: 1000, nm: 0.001 }
 
 function formatDetectionDimension(value: number) {
-  return String(Number(value.toPrecision(6)))
+  return String(Math.ceil(value))
 }
 
 function detectionAreaDefaults(calibration: Calibration, imageWidth: number) {
   const pixelsPerMicrometre = calibration.pixelsPerUnit / micrometresPerUnit[calibration.unit]
   const tenthImageWidthMicrometres = imageWidth * 0.1 / pixelsPerMicrometre
   const unit: Unit = tenthImageWidthMicrometres < 1 ? 'nm' : tenthImageWidthMicrometres >= 1000 ? 'mm' : 'µm'
-  const minimumSide = 3 / micrometresPerUnit[unit]
-  const maximumSide = 50 / micrometresPerUnit[unit]
+  const pixelsPerUnit = calibration.pixelsPerUnit * micrometresPerUnit[unit] / micrometresPerUnit[calibration.unit]
+  const minimumSidePixels = Math.sqrt(50)
+  const maximumSidePixels = Math.max(imageWidth * 0.1, minimumSidePixels * 2)
+  const minimumSide = minimumSidePixels / pixelsPerUnit
+  const maximumSide = maximumSidePixels / pixelsPerUnit
   return {
     unit,
     minimumWidth: formatDetectionDimension(minimumSide),
@@ -310,7 +313,7 @@ function App() {
   const minimumHeightValue = Number(minimumHeight)
   const maximumWidthValue = Number(maximumWidth)
   const maximumHeightValue = Number(maximumHeight)
-  const minimumObjectArea = Math.ceil(minimumWidthValue * minimumHeightValue * detectionPixelsPerUnit ** 2 / 50) * 50
+  const minimumObjectArea = Math.max(50, minimumWidthValue * minimumHeightValue * detectionPixelsPerUnit ** 2)
   const maximumObjectArea = maximumWidthValue * maximumHeightValue * detectionPixelsPerUnit ** 2
   const detectionLimitsValid = [minimumWidth, minimumHeight, maximumWidth, maximumHeight].every((value) => value.trim() !== '') &&
     [minimumWidthValue, minimumHeightValue, maximumWidthValue, maximumHeightValue, minimumObjectArea, maximumObjectArea].every(Number.isFinite) &&
@@ -329,7 +332,7 @@ function App() {
   const changeDetectionUnit = (nextUnit: Unit) => {
     const convert = (value: string) => value.trim() === ''
       ? value
-      : String(Number(value) * micrometresPerUnit[detectionUnit] / micrometresPerUnit[nextUnit])
+      : formatDetectionDimension(Number(value) * micrometresPerUnit[detectionUnit] / micrometresPerUnit[nextUnit])
     setMinimumWidth(convert(minimumWidth))
     setMinimumHeight(convert(minimumHeight))
     setMaximumWidth(convert(maximumWidth))
@@ -972,7 +975,7 @@ function App() {
   const openMeasurementEditor = (measurement: Measurement) => {
     if (!calibration) return
     const rect = measurement.kind === 'box'
-      ? normalizeOrientedBox(measurement.rect)
+      ? longAxisFirst(measurement.rect)
       : boxFromRegion(regionBetween(measurement.start, measurement.end))
     const objectId = measurement.kind === 'box' ? measurement.objectId : `manual-${measurement.id}`
     setTool('select')
@@ -981,6 +984,7 @@ function App() {
 
   const acceptBoxEdit = () => {
     if (!calibration || !boxEditor) return
+    const rect = longAxisFirst(boxEditor.rect)
     const existingIndex = measurements.findIndex((measurement) => measurement.id === boxEditor.measurementId)
     const name = existingIndex >= 0
       ? measurements[existingIndex].name
@@ -989,16 +993,16 @@ function App() {
       const currentIndex = boxEditor.measurementId === null ? -1 : current.findIndex((measurement) => measurement.id === boxEditor.measurementId)
       if (currentIndex >= 0) {
         return current.map((measurement) => measurement.id === boxEditor.measurementId
-          ? { id: measurement.id, kind: 'box', objectId: boxEditor.objectId, rect: boxEditor.rect, name: measurement.name }
+            ? { id: measurement.id, kind: 'box', objectId: boxEditor.objectId, rect, name: measurement.name }
           : measurement)
       }
-      return [...current, { id: Date.now(), kind: 'box', objectId: boxEditor.objectId, rect: boxEditor.rect, name }]
+          return [...current, { id: Date.now(), kind: 'box', objectId: boxEditor.objectId, rect, name }]
     })
     setBoxEditor(null)
     const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
     const unit = calibration?.unit ?? 'px'
     setTool(boxEditor.measurementId === null && boxEditor.objectId.startsWith('clicked-') ? 'measure' : 'select')
-    setStatus(`Box accepted · ${formatLength(boxEditor.rect.width / pixelsPerUnit)} × ${formatLength(boxEditor.rect.height / pixelsPerUnit)} ${unit}`)
+    setStatus(`Box accepted · ${formatLength(rect.width / pixelsPerUnit)} × ${formatLength(rect.height / pixelsPerUnit)} ${unit}`)
   }
 
   const onWheel = (event: WheelEvent<HTMLCanvasElement>) => {
@@ -1020,10 +1024,11 @@ function App() {
 
   const scaleText = calibration ? `1 ${calibration.unit} = ${calibration.pixelsPerUnit.toFixed(2)} px` : t('Not calibrated')
   const boxMeasurements = measurements.filter((measurement): measurement is Extract<Measurement, { kind: 'box' }> => measurement.kind === 'box')
+    .map((measurement) => ({ ...measurement, rect: longAxisFirst(measurement.rect) }))
   const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
   const overviewLengths = boxMeasurements.map((measurement) => measurement.rect.width / pixelsPerUnit)
   const overviewWidths = boxMeasurements.map((measurement) => measurement.rect.height / pixelsPerUnit)
-  const overviewQ = boxMeasurements.map((measurement) => measurement.rect.width / Math.max(1, measurement.rect.height))
+  const overviewQ = boxMeasurements.map((measurement) => measurement.rect.width / measurement.rect.height)
   const lengthStats = summarize(overviewLengths)
   const widthStats = summarize(overviewWidths)
   const qStats = summarize(overviewQ)
@@ -1183,17 +1188,17 @@ function App() {
               <label className="detection-field">
                 <span>{t('Minimum dimensions')}</span>
                 <div className="detection-dimensions">
-                  <input aria-label={t('Minimum width')} type="number" min="0" step="any" value={minimumWidth} disabled={!calibration || detecting} required onChange={(event) => setMinimumWidth(event.target.value)} />
+                  <input aria-label={t('Minimum width')} type="number" min="1" step="1" value={minimumWidth} disabled={!calibration || detecting} required onChange={(event) => setMinimumWidth(event.target.value)} onBlur={() => { if (minimumWidth.trim() !== '' && Number.isFinite(Number(minimumWidth))) setMinimumWidth(formatDetectionDimension(Number(minimumWidth))) }} />
                   <span aria-hidden="true">×</span>
-                  <input aria-label={t('Minimum height')} type="number" min="0" step="any" value={minimumHeight} disabled={!calibration || detecting} required onChange={(event) => setMinimumHeight(event.target.value)} />
+                  <input aria-label={t('Minimum height')} type="number" min="1" step="1" value={minimumHeight} disabled={!calibration || detecting} required onChange={(event) => setMinimumHeight(event.target.value)} onBlur={() => { if (minimumHeight.trim() !== '' && Number.isFinite(Number(minimumHeight))) setMinimumHeight(formatDetectionDimension(Number(minimumHeight))) }} />
                 </div>
               </label>
               <label className="detection-field">
                 <span>{t('Maximum dimensions')}</span>
                 <div className="detection-dimensions">
-                  <input aria-label={t('Maximum width')} type="number" min="0" step="any" value={maximumWidth} disabled={!calibration || detecting} required onChange={(event) => setMaximumWidth(event.target.value)} />
+                  <input aria-label={t('Maximum width')} type="number" min="1" step="1" value={maximumWidth} disabled={!calibration || detecting} required onChange={(event) => setMaximumWidth(event.target.value)} onBlur={() => { if (maximumWidth.trim() !== '' && Number.isFinite(Number(maximumWidth))) setMaximumWidth(formatDetectionDimension(Number(maximumWidth))) }} />
                   <span aria-hidden="true">×</span>
-                  <input aria-label={t('Maximum height')} type="number" min="0" step="any" value={maximumHeight} disabled={!calibration || detecting} required onChange={(event) => setMaximumHeight(event.target.value)} />
+                  <input aria-label={t('Maximum height')} type="number" min="1" step="1" value={maximumHeight} disabled={!calibration || detecting} required onChange={(event) => setMaximumHeight(event.target.value)} onBlur={() => { if (maximumHeight.trim() !== '' && Number.isFinite(Number(maximumHeight))) setMaximumHeight(formatDetectionDimension(Number(maximumHeight))) }} />
                 </div>
               </label>
             </div>
@@ -1205,24 +1210,21 @@ function App() {
             {measurements.length ? (
               <ol className="measurement-list">
                 {[...measurements].reverse().map((measurement) => {
-                  const box = measurement.kind === 'box' ? normalizeOrientedBox(measurement.rect) : null
-                  const q = box ? box.width / Math.max(1, box.height) : null
-                  const lengthShorter = box !== null && box.width < box.height
+                  const box = measurement.kind === 'box' ? longAxisFirst(measurement.rect) : null
+                  const q = box ? box.width / box.height : null
                   return (
-                    <li className={`measurement-row ${lengthShorter ? 'is-warning' : ''}`} key={measurement.id}>
-                      <button className="measurement-open" type="button" disabled={!calibration} onClick={() => openMeasurementEditor(measurement)} aria-label={`${t('Edit {name}', { name: measurement.name })}${lengthShorter ? t(' (warning: length is shorter than width)') : ''}`}>
+                    <li className="measurement-row" key={measurement.id}>
+                      <button className="measurement-open" type="button" disabled={!calibration} onClick={() => openMeasurementEditor(measurement)} aria-label={t('Edit {name}', { name: measurement.name })}>
                         <span className="measurement-index">{measurement.name}</span>
                         <span className="measurement-detail">
                           <strong>{measurement.kind === 'distance'
                             ? calibration ? formatLength(measurement.pixels / calibration.pixelsPerUnit) : measurement.pixels.toFixed(1)
-                            : calibration ? `${formatLength(measurement.rect.width / calibration.pixelsPerUnit)} × ${formatLength(measurement.rect.height / calibration.pixelsPerUnit)}` : `${measurement.rect.width.toFixed(0)} × ${measurement.rect.height.toFixed(0)}`}</strong>
+                            : calibration ? `${formatLength(box!.width / calibration.pixelsPerUnit)} × ${formatLength(box!.height / calibration.pixelsPerUnit)}` : `${box!.width.toFixed(0)} × ${box!.height.toFixed(0)}`}</strong>
                           <small>{measurement.kind === 'distance'
                             ? `${calibration?.unit ?? 'px'} · ${measurement.pixels.toFixed(1)} px`
-                            : `L × W ${calibration?.unit ?? 'px'} · ${measurement.rect.width.toFixed(0)} × ${measurement.rect.height.toFixed(0)} px · Q ${q?.toFixed(2)}`}</small>
+                            : `L × W ${calibration?.unit ?? 'px'} · ${box!.width.toFixed(0)} × ${box!.height.toFixed(0)} px · Q ${q?.toFixed(2)}`}</small>
                         </span>
-                        {lengthShorter && <span className="measurement-warning" title={t('Q < 1: length is shorter than width')} aria-hidden="true">⚠</span>}
                       </button>
-                      {measurement.kind === 'box' && <button className="swap-button" type="button" disabled={!calibration} title={t('Swap length and width')} aria-label={t('Swap length and width for {name}', { name: measurement.name })} onClick={() => setMeasurements((items) => items.map((item) => item.id === measurement.id && item.kind === 'box' ? { ...item, rect: swapBoxAxes(item.rect) } : item))}><span aria-hidden="true">↕</span></button>}
                       <button className="remove-button" type="button" disabled={!calibration} title={t('Remove {name}', { name: measurement.name })} aria-label={t('Remove {name}', { name: measurement.name })} onClick={() => setMeasurements((items) => items.filter((item) => item.id !== measurement.id))}>×</button>
                     </li>
                   )
@@ -1241,7 +1243,7 @@ function App() {
               <div className="overview-row" role="row"><span role="rowheader">{t('Width')}</span><span role="cell">{formatSummary(widthStats, measurementUnit)}</span><span role="cell">{formatDeciles(widthStats, measurementUnit)}</span></div>
               <div className="overview-row" role="row"><span role="rowheader">Q</span><span role="cell">{formatSummary(qStats, '')}</span><span role="cell">{formatDeciles(qStats, '')}</span></div>
             </div>
-            <p className="overview-note">{t('Length and width follow each measurement (use the swap control to exchange them); Q = length ÷ width. SD uses n−1; D1–D9 are interpolated 10th–90th percentiles, with observed extremes in parentheses.')}</p>
+            <p className="overview-note">{t('Q = length ÷ width. SD uses n−1; D1–D9 are interpolated 10th–90th percentiles, with observed extremes in parentheses.')}</p>
           </section>
 
           <section className="overview-section measurement-set-section" aria-labelledby="measurement-set-title">
@@ -1864,10 +1866,12 @@ function BoxEditorDialog({ image, imageSize, editor, unit, pixelsPerUnit, onChan
 }
 
 export function formatBoxDimensionsText(width: number, height: number, calibration?: { pixelsPerUnit: number, unit: string }) {
+  const length = Math.max(width, height)
+  const breadth = Math.min(width, height)
   if (calibration) {
-    return `${formatLength(width / calibration.pixelsPerUnit)} × ${formatLength(height / calibration.pixelsPerUnit)} ${calibration.unit}`
+    return `${formatLength(length / calibration.pixelsPerUnit)} × ${formatLength(breadth / calibration.pixelsPerUnit)} ${calibration.unit}`
   }
-  return `${width.toFixed(0)} × ${height.toFixed(0)} px`
+  return `${length.toFixed(0)} × ${breadth.toFixed(0)} px`
 }
 
 function formatLength(length: number) {
