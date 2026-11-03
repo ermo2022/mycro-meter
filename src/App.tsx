@@ -1074,24 +1074,26 @@ function App() {
 
       <section className="workspace">
         <aside className="tool-rail" aria-label={t('Tools')}>
-          <div className="rail-group">
-            <button className={`tool-button ${tool === 'measure' ? 'is-active' : ''}`} type="button" title={t('Measure object')} aria-label={t('Measure object')} disabled={!calibration} onClick={() => { setTool('measure'); setCalibrationDraft(null); setManualStart(null); setManualDraft(null) }}><span className="tool-glyph box-glyph" /></button>
+          {imageSize && <div className="rail-group">
+            {calibration && <button className={`tool-button ${tool === 'measure' ? 'is-active' : ''}`} type="button" title={t('Measure object')} aria-label={t('Measure object')} disabled={!calibration} onClick={() => { setTool('measure'); setCalibrationDraft(null); setManualStart(null); setManualDraft(null) }}><span className="tool-glyph box-glyph" /></button>}
             <button className={`tool-button ${tool === 'calibrate' ? 'is-active' : ''}`} type="button" title={t('Calibrate scale')} aria-label={t('Calibrate scale')} onClick={() => { setTool('calibrate'); setManualStart(null); setManualDraft(null); setStatus(calibrationLocked ? 'Drag either end to adjust, then enter the distance' : 'Click two points on a known scale bar') }}><span className="tool-glyph calibrate-glyph" /></button>
-            <button className={`tool-button ${tool === 'select' ? 'is-active' : ''}`} type="button" title={t('Select or edit a box')} aria-label={t('Select or edit a box')} disabled={!calibration || !measurements.length} onClick={() => setTool('select')}><span className="tool-glyph select-glyph"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v12l3.2-3.1 2.1 4.6 2-.9-2.1-4.5H12z" /></svg></span></button>
+            {calibration && measurements.length > 0 && <button className={`tool-button ${tool === 'select' ? 'is-active' : ''}`} type="button" title={t('Select or edit a box')} aria-label={t('Select or edit a box')} disabled={!calibration || !measurements.length} onClick={() => setTool('select')}><span className="tool-glyph select-glyph"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v12l3.2-3.1 2.1 4.6 2-.9-2.1-4.5H12z" /></svg></span></button>}
             <button className={`tool-button ${tool === 'pan' ? 'is-active' : ''}`} type="button" title={t('Pan image')} aria-label={t('Pan image')} onClick={() => setTool('pan')}><span className="tool-glyph pan-glyph" /></button>
-          </div>
+          </div>}
+          {calibration && (measurements.length > 0 || manualStart) && <>
           <div className="rail-divider" />
           <div className="rail-group">
             <button className="tool-button" type="button" title={t('Undo last measurement')} aria-label={t('Undo last measurement')} disabled={!calibration || (!measurements.length && !manualStart)} onClick={() => { if (manualStart) { setManualStart(null); setManualDraft(null) } else setMeasurements((items) => items.slice(0, -1)) }}><span className="tool-glyph undo-glyph" /></button>
             <button className="tool-button" type="button" title={t('Clear measurements')} aria-label={t('Clear measurements')} disabled={!calibration || !measurements.length} onClick={clearMeasurements}><span className="tool-glyph clear-glyph" /></button>
           </div>
+          </>}
           <div className="rail-spacer" />
-          <div className="rail-zoom">
+          {imageSize && <div className="rail-zoom">
             <button className="tool-button small-tool" type="button" title={t('Zoom in')} aria-label={t('Zoom in')} onClick={() => setZoom((value) => clampZoom(value * 1.2))}>+</button>
             <span>{Math.round(zoom * 100)}%</span>
             <button className="tool-button small-tool" type="button" title={t('Zoom out')} aria-label={t('Zoom out')} onClick={() => setZoom((value) => clampZoom(value / 1.2))}>−</button>
             <button className="tool-button small-tool fit-button" type="button" title={t('Fit image')} aria-label={t('Fit image')} onClick={setFit}>{t('Fit')}</button>
-          </div>
+          </div>}
         </aside>
 
         <div className="image-column">
@@ -1101,13 +1103,13 @@ function App() {
               <span className="context-value">{imageSize ? `${imageSize.x} × ${imageSize.y} px` : t('Waiting for image')}</span>
             </div>
             <div className="canvas-status"><span className={`tool-dot ${tool}`} />{translateStatus(status, locale)}</div>
-            <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>
-            <button className="tool-button" type="button" title={t('Crop and resample before calibration')} aria-label={t('Crop and resample')} disabled={!imageSize || !!calibration || !!measurements.length} onClick={() => setProcessingOpen(true)}><Crop size={17} /></button>
+            {imageSize && <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>}
+            {imageSize && !calibration && measurements.length === 0 && <button className="tool-button" type="button" title={t('Crop and resample before calibration')} aria-label={t('Crop and resample')} onClick={() => setProcessingOpen(true)}><Crop size={17} /></button>}
           </div>
-          <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
+          {calibration && boxMeasurements.length > 0 && <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
             <span className="eyebrow">{t('MYCOLOGICAL SUMMARY · D1–D9 PERCENTILES')}</span>
             <strong>{mycologicalTitle}</strong>
-          </section>
+          </section>}
           <div className={`canvas-wrap ${!imageSize ? 'is-empty' : ''}`} ref={viewRef}>
             {imageUrl ? (
               <canvas
@@ -1162,12 +1164,12 @@ function App() {
           <div className="panel-heading">
             <div>
               <span className="eyebrow">{t('ANALYSIS')}</span>
-              <h1>{t('Measurements')}</h1>
+              <h1>{t(calibration || measurements.length ? 'Measurements' : imageSize ? 'Image scale' : setSnapshots.length ? 'Measurement set' : 'Open image')}</h1>
             </div>
-            <span className="count-badge">{measurements.length.toString().padStart(2, '0')}</span>
+            {measurements.length > 0 && <span className="count-badge">{measurements.length.toString().padStart(2, '0')}</span>}
           </div>
 
-          <section className="scale-section">
+          {imageSize && <section className="scale-section">
             <div className="section-title"><span>{t('Image scale')}</span><button className="text-button" type="button" onClick={() => { setTool('calibrate'); setCalibrationDraft(null); setCalibrationLocked(false); setStatus('Click two points on a known scale bar') }}>{t('Calibrate')}</button></div>
             <div className={`scale-readout ${calibration ? 'is-calibrated' : ''}`}>
               <span className="scale-symbol" aria-hidden="true">↔</span>
@@ -1175,9 +1177,9 @@ function App() {
               <span className="scale-state">{t(calibration ? 'SET' : 'UNSET')}</span>
             </div>
             <p className="scale-note">{t(calibration ? 'Scale applies to all measurements in this image.' : 'Set a scale to convert pixels into real units.')}</p>
-          </section>
+          </section>}
 
-          <section className="detection-settings" aria-labelledby="detection-settings-title">
+          {calibration && <section className="detection-settings" aria-labelledby="detection-settings-title">
             <div className="section-title">
               <span id="detection-settings-title">{t('Detection settings')}</span>
               <button ref={previewButtonRef} className="text-button detection-preview-open" type="button" disabled={!imageSize || detecting} onClick={() => setPreviewOpen(true)}>{t('Detection preview')}</button>
@@ -1211,11 +1213,11 @@ function App() {
                 </div>
               </label>
             </div>
-            {!detectionLimitsValid && <p className="detection-settings-error" role="alert">{t('Dimensions must be positive; maximum area must be at least minimum.')}</p>}
-          </section>
+            {calibration && !detectionLimitsValid && <p className="detection-settings-error" role="alert">{t('Dimensions must be positive; maximum area must be at least minimum.')}</p>}
+          </section>}
 
-          <section className="results-section">
-            <div className="section-title"><span>{t('Measurements')}</span><button className="text-button" type="button" onClick={exportRawCsv} disabled={!calibration || !measurements.length} title={t('Length and width values only')}>{t('Export CSV')}</button></div>
+          {(calibration || measurements.length > 0) && <section className="results-section">
+            <div className="section-title"><span>{t('Measurements')}</span>{calibration && measurements.length > 0 && <button className="text-button" type="button" onClick={exportRawCsv} title={t('Length and width values only')}>{t('Export CSV')}</button>}</div>
             {measurements.length ? (
               <ol className="measurement-list">
                 {[...measurements].reverse().map((measurement) => {
@@ -1242,9 +1244,9 @@ function App() {
             ) : (
               <div className="no-results"><span className="no-results-mark" aria-hidden="true">＋</span><span>{t('No measurements yet')}</span></div>
             )}
-          </section>
+          </section>}
 
-          <section className="overview-section" aria-labelledby="overview-title">
+          {calibration && boxMeasurements.length > 0 && <section className="overview-section" aria-labelledby="overview-title">
             <div className="section-title"><span id="overview-title">{t('Spore overview')}</span><span className="overview-n">N = {boxMeasurements.length}</span></div>
             <div className="overview-table" role="table" aria-label={t('Spore size and Q summary')}>
               <div className="overview-row overview-header" role="row"><span role="columnheader">{t('Metric')}</span><span role="columnheader">{t('Mean ± SD')}</span><span role="columnheader">D1–D9</span></div>
@@ -1253,14 +1255,14 @@ function App() {
               <div className="overview-row" role="row"><span role="rowheader">Q</span><span role="cell">{formatSummary(qStats, '')}</span><span role="cell">{formatDeciles(qStats, '')}</span></div>
             </div>
             <p className="overview-note">{t('Q = length ÷ width. SD uses n−1; D1–D9 are interpolated 10th–90th percentiles, with observed extremes in parentheses.')}</p>
-          </section>
+          </section>}
 
-          <section className="overview-section measurement-set-section" aria-labelledby="measurement-set-title">
+          {(setSnapshots.length > 0 || (calibration && measurements.length > 0)) && <section className="overview-section measurement-set-section" aria-labelledby="measurement-set-title">
             <div className="section-title"><span id="measurement-set-title">{t('Measurement set')}</span><span className="overview-n">{t('{count} images · N = {total}', { count: measurementSet.length, total: setBoxes.length })}</span></div>
             <div className="set-name-field"><input aria-label={t('Set name')} placeholder={t('Set name')} value={setName} onChange={(event) => setSetName(event.target.value)} /><button className="tool-button" type="button" title={t('New set')} aria-label={t('New set')} onClick={newSet}><Plus size={17} /></button></div>
-            <button className="button set-save-button" type="button" onClick={saveImageToSet} disabled={!calibration || !measurements.length}>
+            {calibration && measurements.length > 0 && <button className="button set-save-button" type="button" onClick={saveImageToSet}>
               <span aria-hidden="true">{currentImageInSet ? '↻' : '+'}</span> {t(currentImageInSet ? 'Update image in set' : 'Add image to set')}
-            </button>
+            </button>}
             {measurementSet.length > 0 && <>
               <ul className="set-image-list" aria-label={t('Images in measurement set')}>
                 {measurementSet.map((image) => (
@@ -1285,18 +1287,18 @@ function App() {
               </div>
               <div className="summary-line set-total"><span>{t('Set measurements')}</span><strong>{setMeasurementCount}</strong></div>
             </>}
-          </section>
+          </section>}
 
-          <div className="panel-bottom">
-            <div className="summary-line"><span>{t(setSnapshots.length ? 'Set measurements' : 'Total measurements')}</span><strong>{setSnapshots.length ? setMeasurementCount : measurements.length}</strong></div>
-            <div className="project-export-actions">
+          {(imageBlob || setSnapshots.length > 0) && <div className="panel-bottom">
+            {(calibration || setSnapshots.length > 0) && <div className="summary-line"><span>{t(setSnapshots.length ? 'Set measurements' : 'Total measurements')}</span><strong>{setSnapshots.length ? setMeasurementCount : measurements.length}</strong></div>}
+            {((calibration && imageBlob) || setSnapshots.length > 0) && <div className="project-export-actions">
               <button className="button button-export" type="button" onClick={exportActiveProject} disabled={!setSnapshots.length && !imageBlob} title={t(setSnapshots.length ? 'ZIP with all set images, calibrations, geometry and CSV' : 'ZIP with PNG image, calibration, geometry and CSV')}><Download size={16} /> {t(setSnapshots.length ? 'Export set' : 'Export session')}</button>
-              {setSnapshots.length > 0 && <button className="text-button" type="button" onClick={exportActiveSession} disabled={!imageBlob} title={t('ZIP with PNG image, calibration, geometry and CSV')}><Download size={14} />{t('Export current session')}</button>}
-            </div>
+              {setSnapshots.length > 0 && calibration && imageBlob && <button className="text-button" type="button" onClick={exportActiveSession} title={t('ZIP with PNG image, calibration, geometry and CSV')}><Download size={14} />{t('Export current session')}</button>}
+            </div>}
             <div className="storage-status" role="status"><Save size={13} />{t(imageBlob && !calibration ? 'Not saved - calibration required' : storageStatus)}</div>
-            <p className="storage-warning">{t('Browser storage can be cleared. Export a ZIP backup to keep a separate copy.')}</p>
+            {(calibration || setSnapshots.length > 0) && <p className="storage-warning">{t('Browser storage can be cleared. Export a ZIP backup to keep a separate copy.')}</p>}
             <p className="privacy-note"><span aria-hidden="true">◈</span> {t('Images stay on this device')}</p>
-          </div>
+          </div>}
         </aside>
       </section>
       {libraryOpen && <ProjectLibrary sessions={savedSessions} sets={savedSets} activeSessionId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredSession} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}

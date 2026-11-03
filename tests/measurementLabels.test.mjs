@@ -36,3 +36,38 @@ test('box labels automatically report the longer dimension first', () => {
   assert.equal(formatBoxDimensionsText(80, 120, { pixelsPerUnit: 10, unit: 'mm' }), '12.00 × 8.000 mm')
   assert.equal(formatBoxDimensionsText(80, 120), '120 × 80 px')
 })
+
+test('analysis sections appear only when their prerequisite data is available', () => {
+  const conditions = new Map()
+  function visit(node) {
+    if (ts.isJsxElement(node) && ts.isBinaryExpression(node.parent)) {
+      const attributes = node.openingElement.attributes.properties
+      const className = attributes.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'className')?.initializer?.text
+      const label = attributes.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'aria-labelledby')?.initializer?.text
+      conditions.set(label ?? className, node.parent.left.getText(source))
+      const onClick = attributes.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'onClick')?.initializer?.expression?.getText(source)
+      if (onClick === 'exportActiveSession') conditions.set('current-session-export', node.parent.left.getText(source))
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  const visible = (key, state) => {
+    assert.ok(conditions.has(key), key)
+    return new Function('imageSize', 'calibration', 'measurements', 'boxMeasurements', 'setSnapshots', 'imageBlob', `return Boolean(${conditions.get(key)})`)(
+      state.image ? { x: 100, y: 80 } : null, state.calibrated ? {} : null,
+      Array(state.measurements ?? 0), Array(state.boxes ?? 0), Array(state.setImages ?? 0), state.image ? {} : null,
+    )
+  }
+  for (const [state, expected] of [
+    [{}, [false, false, false, false, false, false, false, false]],
+    [{ image: true }, [true, false, false, false, false, true, false, false]],
+    [{ image: true, calibrated: true }, [true, true, true, false, false, true, true, false]],
+    [{ image: true, calibrated: true, measurements: 1, boxes: 1 }, [true, true, true, true, true, true, true, false]],
+    [{ image: true, measurements: 1, boxes: 1 }, [true, false, true, false, false, true, false, false]],
+    [{ setImages: 2 }, [false, false, false, false, true, true, true, false]],
+    [{ image: true, setImages: 2 }, [true, false, false, false, true, true, true, false]],
+    [{ image: true, calibrated: true, setImages: 2 }, [true, true, true, false, true, true, true, true]],
+  ]) {
+    assert.deepEqual(['scale-section', 'detection-settings-title', 'results-section', 'overview-title', 'measurement-set-title', 'panel-bottom', 'project-export-actions', 'current-session-export'].map(key => visible(key, state)), expected)
+  }
+})

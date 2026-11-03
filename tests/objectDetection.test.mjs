@@ -52,6 +52,24 @@ const detectionSettings = compile([
   '}',
 ].join('\n'))
 
+test('dimension warning appears only for calibrated invalid limits', () => {
+  let condition
+  function findWarning(node) {
+    if (ts.isJsxElement(node)) {
+      const className = node.openingElement.attributes.properties.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(appSource) === 'className')
+      if (className?.initializer?.text === 'detection-settings-error' && ts.isBinaryExpression(node.parent)) condition = node.parent.left.getText(appSource)
+    }
+    ts.forEachChild(node, findWarning)
+  }
+  findWarning(appSource)
+  assert.ok(condition)
+  const warningVisible = new Function('calibration', 'detectionLimitsValid', `return Boolean(${condition})`)
+  assert.equal(warningVisible(null, false), false)
+  assert.equal(warningVisible(null, true), false)
+  assert.equal(warningVisible({ pixelsPerUnit: 7.62, unit: 'mm' }, true), false)
+  assert.equal(warningVisible({ pixelsPerUnit: 7.62, unit: 'mm' }, false), true)
+})
+
 test('detection defaults round physical dimensions up while retaining the pixel-area floor', () => {
   for (const calibration of [
     { pixelsPerUnit: 7.62, unit: 'mm' },
