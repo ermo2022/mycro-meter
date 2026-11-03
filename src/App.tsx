@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
 import * as UTIF from 'utif'
-import { Crop, Download, FolderOpen, Plus, Save } from 'lucide-react'
-import { resampleMicroscopeImage, type ImageCrop } from './imageResampler'
-import { createSession, deleteProject, exportProjectBundle, importProjectBundle, listProjects, saveSession, saveSet, type StoredSession, type StoredSet } from './projectStorage'
-import { ImageProcessingDialog, ProjectLibrary } from './WorkspaceDialogs'
+import { Crop, Download, FolderOpen, Move, Plus, Save, X } from 'lucide-react'
+import { adjustImageCrop, resampleMicroscopeImage, type CropHandle, type ImageCrop } from './imageResampler'
+import { createImageRecord, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listProjects, saveImageRecord, saveSet, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
+import { ImageProcessingPanel, ProjectLibrary } from './WorkspaceDialogs'
 import { createDetectionPreview, detectClickedObject, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
-import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, swapBoxAxes, type BoxHandle, type OrientedBox } from './boxGeometry'
-import { MAX_SESSION_CSV_BYTES, MAX_SESSION_IMAGE_PIXELS, measurementSetBoxes, measurementSetCsv, parseSessionCsv, rawMeasurementsCsv, units, type Calibration, type Measurement, type MeasurementSession, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
+import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, type BoxHandle, type OrientedBox } from './boxGeometry'
+import { MAX_IMAGE_RECORD_CSV_BYTES, MAX_IMAGE_RECORD_IMAGE_PIXELS, measurementSetBoxes, measurementSetCsv, parseImageRecordCsv, rawMeasurementsCsv, units, type Calibration, type ImageMeasurementData, type Measurement, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
 
 type BoxRectangle = OrientedBox
 type BoxEditorState = { objectId: string; measurementId: number | null; rect: BoxRectangle; nearby?: boolean }
@@ -51,9 +51,9 @@ function translateStatus(status: string, locale: LocaleData) {
   if (savedSet) return render('savedSet', { imageName: savedSet[1] })
   const acceptedBox = status.match(/^Box accepted · (.*)$/)
   if (acceptedBox) return render('boxAccepted', { dimensions: acceptedBox[1] })
-  const pendingSession = status.match(/^Session read · open (.*) to restore (\d+) measurements$/)
-  if (pendingSession) return render('pendingSession', { imageName: pendingSession[1], count: pendingSession[2] })
-  const imageMismatch = status.match(/^Image is (.*) px, session expects (.*) px · open (.*)$/)
+  const pendingImageRecord = status.match(/^Image record read · open (.*) to restore (\d+) measurements$/)
+  if (pendingImageRecord) return render('pendingImageRecord', { imageName: pendingImageRecord[1], count: pendingImageRecord[2] })
+  const imageMismatch = status.match(/^Image is (.*) px, image record expects (.*) px · open (.*)$/)
   if (imageMismatch) return render('imageMismatch', { actual: imageMismatch[1], expected: imageMismatch[2], imageName: imageMismatch[3] })
   const invalidCsvValue = status.match(/^Invalid (.+) in CSV row (\d+)$/)
   if (invalidCsvValue) return render('invalidCsvValue', { field: invalidCsvValue[1], row: invalidCsvValue[2] })
@@ -74,7 +74,7 @@ async function imageFileToUrl(file: File) {
   const pages = UTIF.decode(buffer)
   const page = pages[0]
   if (!page) throw new Error('No TIFF image page found')
-  if (!Number.isInteger(page.width) || !Number.isInteger(page.height) || page.width <= 0 || page.height <= 0 || page.width * page.height > MAX_SESSION_IMAGE_PIXELS) {
+  if (!Number.isInteger(page.width) || !Number.isInteger(page.height) || page.width <= 0 || page.height <= 0 || page.width * page.height > MAX_IMAGE_RECORD_IMAGE_PIXELS) {
     throw new Error('Image dimensions are invalid or exceed 40 megapixels')
   }
   UTIF.decodeImage(buffer, page)
@@ -152,15 +152,18 @@ function clampZoom(value: number) {
 const micrometresPerUnit: Record<Unit, number> = { 'µm': 1, mm: 1000, nm: 0.001 }
 
 function formatDetectionDimension(value: number) {
-  return String(Number(value.toPrecision(6)))
+  return String(Math.ceil(value))
 }
 
 function detectionAreaDefaults(calibration: Calibration, imageWidth: number) {
   const pixelsPerMicrometre = calibration.pixelsPerUnit / micrometresPerUnit[calibration.unit]
   const tenthImageWidthMicrometres = imageWidth * 0.1 / pixelsPerMicrometre
   const unit: Unit = tenthImageWidthMicrometres < 1 ? 'nm' : tenthImageWidthMicrometres >= 1000 ? 'mm' : 'µm'
-  const minimumSide = 3 / micrometresPerUnit[unit]
-  const maximumSide = 50 / micrometresPerUnit[unit]
+  const pixelsPerUnit = calibration.pixelsPerUnit * micrometresPerUnit[unit] / micrometresPerUnit[calibration.unit]
+  const minimumSidePixels = Math.sqrt(50)
+  const maximumSidePixels = Math.max(imageWidth * 0.1, minimumSidePixels * 2)
+  const minimumSide = minimumSidePixels / pixelsPerUnit
+  const maximumSide = maximumSidePixels / pixelsPerUnit
   return {
     unit,
     minimumWidth: formatDetectionDimension(minimumSide),
@@ -250,13 +253,18 @@ function App() {
   const previewButtonRef = useRef<HTMLButtonElement>(null)
   const imageLoadEpochRef = useRef(0)
   const [imageBlob, setImageBlob] = useState<Blob | null>(null)
-  const [savedSessions, setSavedSessions] = useState<StoredSession[]>([])
-  const [savedSets, setSavedSets] = useState<StoredSet[]>([])
+  const [savedImageRecords, setSavedImageRecords] = useState<StoredImageRecord[]>([])
+  const [savedSets, setSavedSets] = useState<StoredMeasurementSet[]>([])
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [processingOpen, setProcessingOpen] = useState(false)
+  const [cropBusy, setCropBusy] = useState(false)
+  const [crop, setCrop] = useState<ImageCrop>({ x: 0, y: 0, width: 1, height: 1 })
+  const [reduction, setReduction] = useState(1)
+  const [canvasSize, setCanvasSize] = useState<Point>({ x: 0, y: 0 })
+  const cropDragRef = useRef<{ pointerId: number; x: number; y: number; crop: ImageCrop; handle: CropHandle | null } | null>(null)
   const [storageReady, setStorageReady] = useState(false)
   const [storageStatus, setStorageStatus] = useState('')
-  const [setSnapshots, setSetSnapshots] = useState<StoredSession[]>([])
+  const [setSnapshots, setSetSnapshots] = useState<StoredImageRecord[]>([])
   const [setId, setSetId] = useState<string>(() => crypto.randomUUID())
   const [setName, setSetName] = useState('')
   const [language, setLanguage] = useState<Language>(() => {
@@ -270,7 +278,7 @@ function App() {
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 })
   const [calibration, setCalibration] = useState<Calibration | null>(null)
-  const [pendingImport, setPendingImport] = useState<MeasurementSession | null>(null)
+  const [pendingImport, setPendingImport] = useState<ImageMeasurementData | null>(null)
   const [calibrationDraft, setCalibrationDraft] = useState<CalibrationDraft | null>(null)
   const [calibrationLocked, setCalibrationLocked] = useState(false)
   const [calibrationEntering, setCalibrationEntering] = useState(false)
@@ -310,7 +318,7 @@ function App() {
   const minimumHeightValue = Number(minimumHeight)
   const maximumWidthValue = Number(maximumWidth)
   const maximumHeightValue = Number(maximumHeight)
-  const minimumObjectArea = Math.ceil(minimumWidthValue * minimumHeightValue * detectionPixelsPerUnit ** 2 / 50) * 50
+  const minimumObjectArea = Math.max(50, minimumWidthValue * minimumHeightValue * detectionPixelsPerUnit ** 2)
   const maximumObjectArea = maximumWidthValue * maximumHeightValue * detectionPixelsPerUnit ** 2
   const detectionLimitsValid = [minimumWidth, minimumHeight, maximumWidth, maximumHeight].every((value) => value.trim() !== '') &&
     [minimumWidthValue, minimumHeightValue, maximumWidthValue, maximumHeightValue, minimumObjectArea, maximumObjectArea].every(Number.isFinite) &&
@@ -329,7 +337,7 @@ function App() {
   const changeDetectionUnit = (nextUnit: Unit) => {
     const convert = (value: string) => value.trim() === ''
       ? value
-      : String(Number(value) * micrometresPerUnit[detectionUnit] / micrometresPerUnit[nextUnit])
+      : formatDetectionDimension(Number(value) * micrometresPerUnit[detectionUnit] / micrometresPerUnit[nextUnit])
     setMinimumWidth(convert(minimumWidth))
     setMinimumHeight(convert(minimumHeight))
     setMaximumWidth(convert(maximumWidth))
@@ -346,24 +354,24 @@ function App() {
     const storage = navigator.storage
     if (storage?.persist) void storage.persist().catch(() => false)
     void listProjects().then((projects) => {
-      setSavedSessions(projects.sessions)
+      setSavedImageRecords(projects.imageRecords)
       setSavedSets(projects.sets)
     }).catch(() => setStorageStatus('Local storage unavailable')).finally(() => setStorageReady(true))
   }, [])
 
   useEffect(() => {
     if (!storageReady || !imageBlob || !imageSize || !imageId || !calibration) return
-    const record = createSession(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })
+    const record = createImageRecord(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })
     setStorageStatus('Saving locally')
-    void saveSession(record).then(() => {
-      setSavedSessions((current) => [record, ...current.filter((entry) => entry.id !== record.id)])
+    void saveImageRecord(record).then(() => {
+      setSavedImageRecords((current) => [record, ...current.filter((entry) => entry.id !== record.id)])
       setStorageStatus('Saved locally')
     }).catch(() => setStorageStatus('Local save failed. Export a ZIP backup.'))
   }, [storageReady, imageBlob, imageSize, imageId, imageName, calibration, measurements])
 
   useEffect(() => {
     if (!storageReady || !setSnapshots.length) return
-    const record: StoredSet = { id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), sessionIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots }
+    const record: StoredMeasurementSet = { id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots }
     void saveSet(record).then(() => {
       setSavedSets((current) => [record, ...current.filter((entry) => entry.id !== record.id)])
     }).catch(() => setStorageStatus('Local save failed. Export a ZIP backup.'))
@@ -389,6 +397,7 @@ function App() {
 
     const draw = () => {
       const bounds = view.getBoundingClientRect()
+      setCanvasSize((current) => current.x === bounds.width && current.y === bounds.height ? current : { x: bounds.width, y: bounds.height })
       const dpr = window.devicePixelRatio || 1
       canvas.width = Math.max(1, Math.round(bounds.width * dpr))
       canvas.height = Math.max(1, Math.round(bounds.height * dpr))
@@ -480,28 +489,28 @@ function App() {
     return () => observer.disconnect()
   }, [imageSize, zoom, pan, measurements, manualDraft, calibration, calibrationDraft, tool])
 
-  const applySession = (session: MeasurementSession) => {
+  const applyImageRecord = (imageRecord: ImageMeasurementData) => {
     detectionEpochRef.current += 1
     measurementGestureRef.current = null
-    setCalibration(session.calibration)
-    if (session.calibration) applyDetectionAreaDefaults(session.calibration, session.imageWidth)
+    setCalibration(imageRecord.calibration)
+    if (imageRecord.calibration) applyDetectionAreaDefaults(imageRecord.calibration, imageRecord.imageWidth)
     setCalibrationDraft(null)
     setCalibrationLocked(false)
     setManualStart(null)
     setManualDraft(null)
-    setTool(session.calibration ? 'measure' : 'calibrate')
-    setMeasurements(session.measurements)
+    setTool(imageRecord.calibration ? 'measure' : 'calibrate')
+    setMeasurements(imageRecord.measurements)
     setBoxEditor(null)
     setPendingImport(null)
-    setStatus(`Restored ${session.measurements.length} measurements${session.calibration ? '' : ' · calibration required'}`)
+    setStatus(`Restored ${imageRecord.measurements.length} measurements${imageRecord.calibration ? '' : ' · calibration required'}`)
   }
 
-  const loadImage = (url: string, fileName: string, session?: MeasurementSession | null, restoredId?: string, storedBlob?: Blob) => {
+  const loadImage = (url: string, fileName: string, imageRecord?: ImageMeasurementData | null, restoredId?: string, storedBlob?: Blob) => {
     const epoch = ++imageLoadEpochRef.current
     const image = new Image()
     image.onload = async () => {
       if (epoch !== imageLoadEpochRef.current) { URL.revokeObjectURL(url); return }
-      if (image.naturalWidth <= 0 || image.naturalHeight <= 0 || image.naturalWidth * image.naturalHeight > MAX_SESSION_IMAGE_PIXELS) {
+      if (image.naturalWidth <= 0 || image.naturalHeight <= 0 || image.naturalWidth * image.naturalHeight > MAX_IMAGE_RECORD_IMAGE_PIXELS) {
         URL.revokeObjectURL(url)
         setStatus('Image dimensions are invalid or exceed 40 megapixels')
         return
@@ -537,12 +546,12 @@ function App() {
       setManualDraft(null)
       setZoom(1)
       setPan({ x: 0, y: 0 })
-      if (!session) {
+      if (!imageRecord) {
         setStatus('Calibration required · click two points on a known scale bar')
-      } else if (session.imageWidth === image.naturalWidth && session.imageHeight === image.naturalHeight) {
-        applySession(session)
+      } else if (imageRecord.imageWidth === image.naturalWidth && imageRecord.imageHeight === image.naturalHeight) {
+        applyImageRecord(imageRecord)
       } else {
-        setStatus(`Image is ${image.naturalWidth} × ${image.naturalHeight} px, session expects ${session.imageWidth} × ${session.imageHeight} px · open ${session.imageName}`)
+        setStatus(`Image is ${image.naturalWidth} × ${image.naturalHeight} px, image record expects ${imageRecord.imageWidth} × ${imageRecord.imageHeight} px · open ${imageRecord.imageName}`)
       }
     }
     image.onerror = () => {
@@ -574,7 +583,7 @@ function App() {
     if (projectFile) {
       try {
         const project = await importProjectBundle(projectFile)
-        for (const record of project.sessions) {
+        for (const record of project.imageRecords) {
           const image = new Image()
           const url = URL.createObjectURL(record.imageBlob)
           try {
@@ -583,47 +592,47 @@ function App() {
             if (image.naturalWidth !== record.metadata.imageWidth || image.naturalHeight !== record.metadata.imageHeight) throw new Error('Project image dimensions do not match')
           } finally { URL.revokeObjectURL(url) }
         }
-        for (const record of project.sessions) await saveSession(record)
+        for (const record of project.imageRecords) await saveImageRecord(record)
         if (project.set) { await saveSet(project.set); openStoredSet(project.set) }
-        else openStoredSession(project.sessions[0])
+        else openStoredImageRecord(project.imageRecords[0])
         const projects = await listProjects()
-        setSavedSessions(projects.sessions)
+        setSavedImageRecords(projects.imageRecords)
         setSavedSets(projects.sets)
       } catch (error) { setStatus(error instanceof Error ? error.message : 'Project import failed') }
       return
     }
     const csvFile = files.find((file) => /\.csv$/i.test(file.name) || file.type === 'text/csv')
     if (!csvFile) {
-      setStatus('Choose a Mycrometer session CSV')
+      setStatus('Choose a Mycrometer image record CSV')
       return
     }
-    if (csvFile.size > MAX_SESSION_CSV_BYTES) {
-      setStatus('Session CSV exceeds the 10 MiB limit')
+    if (csvFile.size > MAX_IMAGE_RECORD_CSV_BYTES) {
+      setStatus('Image record CSV exceeds the 10 MiB limit')
       return
     }
-    let session: MeasurementSession
+    let imageRecord: ImageMeasurementData
     try {
-      session = parseSessionCsv(await csvFile.text())
+      imageRecord = parseImageRecordCsv(await csvFile.text())
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'That CSV could not be read')
       return
     }
     const imageFiles = files.filter((file) => file !== csvFile && file.type.startsWith('image/'))
-    const imageFile = imageFiles.find((file) => file.name === session.imageName) ?? (imageFiles.length === 1 ? imageFiles[0] : undefined)
+    const imageFile = imageFiles.find((file) => file.name === imageRecord.imageName) ?? (imageFiles.length === 1 ? imageFiles[0] : undefined)
     if (imageFile) {
       try {
-        loadImage(await imageFileToUrl(imageFile), imageFile.name, session)
+        loadImage(await imageFileToUrl(imageFile), imageFile.name, imageRecord)
       } catch {
         setStatus('That image could not be decoded')
       }
       return
     }
-    if (imageRef.current && imageName === session.imageName && imageSize?.x === session.imageWidth && imageSize?.y === session.imageHeight) {
-      applySession(session)
+    if (imageRef.current && imageName === imageRecord.imageName && imageSize?.x === imageRecord.imageWidth && imageSize?.y === imageRecord.imageHeight) {
+      applyImageRecord(imageRecord)
       return
     }
-    setPendingImport(session)
-    setStatus(`Session read · open ${session.imageName} to restore ${session.measurements.length} measurements`)
+    setPendingImport(imageRecord)
+    setStatus(`Image record read · open ${imageRecord.imageName} to restore ${imageRecord.measurements.length} measurements`)
     // Browsers cannot open files by path, so ask the user to pick the image.
     fileInputRef.current?.click()
   }
@@ -882,7 +891,7 @@ function App() {
     setMeasurementSet((current) => current.some((image) => image.id === imageId)
       ? current.map((image) => image.id === imageId ? snapshot : image)
       : [...current, snapshot])
-    const record = createSession(imageId, imageBlob, snapshot)
+    const record = createImageRecord(imageId, imageBlob, snapshot)
     setSetSnapshots((current) => current.some((entry) => entry.id === imageId)
       ? current.map((entry) => entry.id === imageId ? record : entry)
       : [...current, record])
@@ -894,7 +903,7 @@ function App() {
     exportCsv(rawMeasurementsCsv(measurements, calibration), `${exportStem}-measurements.csv`)
   }
 
-  const exportProject = async (records: StoredSession[], set?: StoredSet) => {
+  const exportProject = async (records: StoredImageRecord[], set?: StoredMeasurementSet) => {
     try {
       const blob = await exportProjectBundle(records, set)
       const link = document.createElement('a')
@@ -902,7 +911,7 @@ function App() {
       link.href = url
       const name = set ? set.name : records[0].metadata.imageName.replace(/\.[^.]+$/, '')
       const stem = name.trim().replace(/[^a-z0-9_-]+/gi, '_') || 'mycrometer'
-      link.download = `${stem}-${set ? 'set' : 'session'}.zip`
+      link.download = `${stem}-${set ? 'set' : 'image'}.zip`
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -910,35 +919,62 @@ function App() {
     } catch (error) { setStatus(error instanceof Error ? error.message : 'Project export failed') }
   }
 
-  const exportActiveSession = () => {
+  const exportActiveImageRecord = () => {
     if (!imageSize || !imageBlob) return
-    void exportProject([createSession(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })])
+    void exportProject([createImageRecord(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })])
   }
 
-  const activeSet = (): StoredSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), sessionIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots })
+  const activeSet = (): StoredMeasurementSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots })
 
-  const openStoredSession = (record: StoredSession) => {
+  const exportActiveProject = () => {
+    if (!setSnapshots.length) {
+      exportActiveImageRecord()
+      return
+    }
+    const record = activeSet()
+    void exportProject(record.images, record)
+  }
+
+  const openStoredImageRecord = (record: StoredImageRecord) => {
     setLibraryOpen(false)
     loadImage(URL.createObjectURL(record.imageBlob), record.metadata.imageName, record.metadata, record.id, record.imageBlob)
   }
 
-  const openStoredSet = (record: StoredSet) => {
+  const openStoredSet = (record: StoredMeasurementSet) => {
     setSetId(record.id)
     setSetName(record.name)
     setSetUnit(record.unit)
     setSetSnapshots(record.images)
     setMeasurementSet(record.images.map((entry) => ({ ...entry.metadata, id: entry.id })) as MeasurementSetImage[])
-    if (record.images[0]) openStoredSession(record.images[0])
+    if (record.images[0]) openStoredImageRecord(record.images[0])
     else setLibraryOpen(false)
   }
 
-  const removeProject = async (id: string, kind: 'session' | 'set') => {
-    if ((kind === 'session' && id === imageId) || (kind === 'set' && id === setId && setSnapshots.length > 0)) return
+  const removeProject = async (id: string, kind: 'image-record' | 'set') => {
+    if ((kind === 'image-record' && id === imageId) || (kind === 'set' && id === setId && setSnapshots.length > 0)) return
     try {
       await deleteProject(id, kind)
-      if (kind === 'session') setSavedSessions((current) => current.filter((entry) => entry.id !== id))
+      if (kind === 'image-record') setSavedImageRecords((current) => current.filter((entry) => entry.id !== id))
       else setSavedSets((current) => current.filter((entry) => entry.id !== id))
     } catch { setStorageStatus('Could not delete saved project') }
+  }
+
+  const removeProjects = async (projects: { id: string; kind: 'image-record' | 'set' }[]) => {
+    const deletable = projects.filter((project) =>
+      (project.kind !== 'image-record' || project.id !== imageId) &&
+      (project.kind !== 'set' || project.id !== setId || setSnapshots.length === 0))
+    if (!deletable.length || !window.confirm(t('Delete {count} selected projects?', { count: deletable.length }))) return false
+    try {
+      await deleteProjects(deletable)
+      const deletedImageIds = new Set(deletable.filter((project) => project.kind === 'image-record').map((project) => project.id))
+      const deletedSetIds = new Set(deletable.filter((project) => project.kind === 'set').map((project) => project.id))
+      setSavedImageRecords((current) => current.filter((record) => !deletedImageIds.has(record.id)))
+      setSavedSets((current) => current.filter((record) => !deletedSetIds.has(record.id)))
+      return true
+    } catch {
+      setStorageStatus('Could not delete saved project')
+      return false
+    }
   }
 
   const newSet = () => {
@@ -946,6 +982,15 @@ function App() {
     setSetName('')
     setSetSnapshots([])
     setMeasurementSet([])
+  }
+
+  const closeCurrentWork = () => {
+    setSetId(crypto.randomUUID())
+    setSetName('')
+    setSetUnit('µm')
+    setSetSnapshots([])
+    setMeasurementSet([])
+    unloadImage()
   }
 
   const removeSetImage = (id: string) => {
@@ -956,9 +1001,21 @@ function App() {
 
   const processImage = async (crop: ImageCrop, reduction: number) => {
     if (!imageRef.current || calibration || measurements.length) return
-    const png = await resampleMicroscopeImage(imageRef.current, crop, reduction)
-    setProcessingOpen(false)
-    loadImage(URL.createObjectURL(png), `${exportStem}-crop.png`, null, undefined, png)
+    setCropBusy(true)
+    try {
+      const png = await resampleMicroscopeImage(imageRef.current, crop, reduction)
+      setProcessingOpen(false)
+      loadImage(URL.createObjectURL(png), `${exportStem}-crop.png`, null, undefined, png)
+    } finally {
+      setCropBusy(false)
+    }
+  }
+
+  const openCrop = () => {
+    if (!imageSize) return
+    setCrop({ x: 0, y: 0, width: imageSize.x, height: imageSize.y })
+    setReduction(1)
+    setProcessingOpen(true)
   }
 
   const clearMeasurements = () => {
@@ -972,7 +1029,7 @@ function App() {
   const openMeasurementEditor = (measurement: Measurement) => {
     if (!calibration) return
     const rect = measurement.kind === 'box'
-      ? normalizeOrientedBox(measurement.rect)
+      ? longAxisFirst(measurement.rect)
       : boxFromRegion(regionBetween(measurement.start, measurement.end))
     const objectId = measurement.kind === 'box' ? measurement.objectId : `manual-${measurement.id}`
     setTool('select')
@@ -981,6 +1038,7 @@ function App() {
 
   const acceptBoxEdit = () => {
     if (!calibration || !boxEditor) return
+    const rect = longAxisFirst(boxEditor.rect)
     const existingIndex = measurements.findIndex((measurement) => measurement.id === boxEditor.measurementId)
     const name = existingIndex >= 0
       ? measurements[existingIndex].name
@@ -989,16 +1047,16 @@ function App() {
       const currentIndex = boxEditor.measurementId === null ? -1 : current.findIndex((measurement) => measurement.id === boxEditor.measurementId)
       if (currentIndex >= 0) {
         return current.map((measurement) => measurement.id === boxEditor.measurementId
-          ? { id: measurement.id, kind: 'box', objectId: boxEditor.objectId, rect: boxEditor.rect, name: measurement.name }
+            ? { id: measurement.id, kind: 'box', objectId: boxEditor.objectId, rect, name: measurement.name }
           : measurement)
       }
-      return [...current, { id: Date.now(), kind: 'box', objectId: boxEditor.objectId, rect: boxEditor.rect, name }]
+          return [...current, { id: Date.now(), kind: 'box', objectId: boxEditor.objectId, rect, name }]
     })
     setBoxEditor(null)
     const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
     const unit = calibration?.unit ?? 'px'
     setTool(boxEditor.measurementId === null && boxEditor.objectId.startsWith('clicked-') ? 'measure' : 'select')
-    setStatus(`Box accepted · ${formatLength(boxEditor.rect.width / pixelsPerUnit)} × ${formatLength(boxEditor.rect.height / pixelsPerUnit)} ${unit}`)
+    setStatus(`Box accepted · ${formatLength(rect.width / pixelsPerUnit)} × ${formatLength(rect.height / pixelsPerUnit)} ${unit}`)
   }
 
   const onWheel = (event: WheelEvent<HTMLCanvasElement>) => {
@@ -1020,10 +1078,11 @@ function App() {
 
   const scaleText = calibration ? `1 ${calibration.unit} = ${calibration.pixelsPerUnit.toFixed(2)} px` : t('Not calibrated')
   const boxMeasurements = measurements.filter((measurement): measurement is Extract<Measurement, { kind: 'box' }> => measurement.kind === 'box')
+    .map((measurement) => ({ ...measurement, rect: longAxisFirst(measurement.rect) }))
   const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
   const overviewLengths = boxMeasurements.map((measurement) => measurement.rect.width / pixelsPerUnit)
   const overviewWidths = boxMeasurements.map((measurement) => measurement.rect.height / pixelsPerUnit)
-  const overviewQ = boxMeasurements.map((measurement) => measurement.rect.width / Math.max(1, measurement.rect.height))
+  const overviewQ = boxMeasurements.map((measurement) => measurement.rect.width / measurement.rect.height)
   const lengthStats = summarize(overviewLengths)
   const widthStats = summarize(overviewWidths)
   const qStats = summarize(overviewQ)
@@ -1037,6 +1096,43 @@ function App() {
   const setQStats = summarize(setBoxes.map((box) => box.q))
   const setMeasurementCount = measurementSet.reduce((total, image) => total + image.measurements.length, 0)
   const currentImageInSet = measurementSet.some((image) => image.id === imageId)
+  const cropViewTransform = imageSize && canvasSize.x > 0 && canvasSize.y > 0 ? (() => {
+    const scale = Math.max(0.01, Math.min((canvasSize.x - 64) / imageSize.x, (canvasSize.y - 64) / imageSize.y) * zoom)
+    return { scale, left: (canvasSize.x - imageSize.x * scale) / 2 + pan.x, top: (canvasSize.y - imageSize.y * scale) / 2 + pan.y }
+  })() : null
+  const cropHandleLabels: Record<CropHandle, string> = {
+    n: 'Resize crop top edge', ne: 'Resize crop top right corner', e: 'Resize crop right edge',
+    se: 'Resize crop bottom right corner', s: 'Resize crop bottom edge', sw: 'Resize crop bottom left corner',
+    w: 'Resize crop left edge', nw: 'Resize crop top left corner', move: 'Move crop',
+  }
+  const cropPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (cropBusy || !imageSize || !cropViewTransform || cropDragRef.current || event.button !== 0) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const point = {
+      x: (event.clientX - bounds.left - cropViewTransform.left) / cropViewTransform.scale,
+      y: (event.clientY - bounds.top - cropViewTransform.top) / cropViewTransform.scale,
+    }
+    if (point.x < 0 || point.y < 0 || point.x > imageSize.x || point.y > imageSize.y) return
+    let handle = (event.target as HTMLElement).closest<HTMLElement>('[data-crop-handle]')?.dataset.cropHandle as CropHandle | undefined
+    if (handle === 'move' && crop.width === imageSize.x && crop.height === imageSize.y) handle = undefined
+    cropDragRef.current = {
+      pointerId: event.pointerId,
+      x: Math.max(0, Math.min(imageSize.x - 1, Math.round(point.x))),
+      y: Math.max(0, Math.min(imageSize.y - 1, Math.round(point.y))),
+      crop: { ...crop },
+      handle: handle ?? null,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  const cropPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const start = cropDragRef.current
+    if (cropBusy || !start || start.pointerId !== event.pointerId || !imageSize || !cropViewTransform) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const endX = Math.max(0, Math.min(imageSize.x, Math.round((event.clientX - bounds.left - cropViewTransform.left) / cropViewTransform.scale)))
+    const endY = Math.max(0, Math.min(imageSize.y, Math.round((event.clientY - bounds.top - cropViewTransform.top) / cropViewTransform.scale)))
+    if (start.handle) setCrop(adjustImageCrop(start.crop, start.handle, endX - start.x, endY - start.y, imageSize.x, imageSize.y))
+    else setCrop({ x: Math.min(start.x, endX), y: Math.min(start.y, endY), width: Math.max(1, Math.abs(endX - start.x)), height: Math.max(1, Math.abs(endY - start.y)) })
+  }
 
   return (
     <main className="app-shell" lang={language}>
@@ -1050,7 +1146,7 @@ function App() {
           <span className="offline-indicator"><i />{t('Local workspace')}</span>
             <label className="language-picker"><span>{t('Language')}</span><select aria-label={t('Language')} value={language} onChange={(event) => setLanguage(event.target.value)}>{Object.entries(locales).map(([code, languageLocale]) => <option key={code} value={code}>{languageLocale.languageName}</option>)}</select></label>
           <button className="button button-quiet" type="button" onClick={() => setLibraryOpen(true)}><FolderOpen size={16} />{t('Saved projects')}</button>
-          <button className="button button-quiet" type="button" title={t('Import ZIP project or legacy session CSV')} onClick={() => importInputRef.current?.click()}>{t('Import project')}</button>
+          <button className="button button-quiet" type="button" title={t('Import ZIP project or image record CSV')} onClick={() => importInputRef.current?.click()}>{t('Import project')}</button>
           <input ref={importInputRef} className="visually-hidden" type="file" accept=".zip,.myproj,.csv,application/zip,text/csv,image/*" multiple onChange={handleImport} />
           <button className="button button-quiet" type="button" onClick={() => fileInputRef.current?.click()}>{t(imageUrl ? 'Replace image' : 'Open image')}</button>
           {imageUrl && <button className="button button-unload" type="button" title={t('Unload image and clear its measurements')} onClick={unloadImage}><span aria-hidden="true">×</span> {t('Unload')}</button>}
@@ -1060,24 +1156,26 @@ function App() {
 
       <section className="workspace">
         <aside className="tool-rail" aria-label={t('Tools')}>
-          <div className="rail-group">
-            <button className={`tool-button ${tool === 'measure' ? 'is-active' : ''}`} type="button" title={t('Measure object')} aria-label={t('Measure object')} disabled={!calibration} onClick={() => { setTool('measure'); setCalibrationDraft(null); setManualStart(null); setManualDraft(null) }}><span className="tool-glyph box-glyph" /></button>
+          {imageSize && <div className="rail-group">
+            {calibration && <button className={`tool-button ${tool === 'measure' ? 'is-active' : ''}`} type="button" title={t('Measure object')} aria-label={t('Measure object')} disabled={!calibration} onClick={() => { setTool('measure'); setCalibrationDraft(null); setManualStart(null); setManualDraft(null) }}><span className="tool-glyph box-glyph" /></button>}
             <button className={`tool-button ${tool === 'calibrate' ? 'is-active' : ''}`} type="button" title={t('Calibrate scale')} aria-label={t('Calibrate scale')} onClick={() => { setTool('calibrate'); setManualStart(null); setManualDraft(null); setStatus(calibrationLocked ? 'Drag either end to adjust, then enter the distance' : 'Click two points on a known scale bar') }}><span className="tool-glyph calibrate-glyph" /></button>
-            <button className={`tool-button ${tool === 'select' ? 'is-active' : ''}`} type="button" title={t('Select or edit a box')} aria-label={t('Select or edit a box')} disabled={!calibration || !measurements.length} onClick={() => setTool('select')}><span className="tool-glyph select-glyph"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v12l3.2-3.1 2.1 4.6 2-.9-2.1-4.5H12z" /></svg></span></button>
+            {calibration && measurements.length > 0 && <button className={`tool-button ${tool === 'select' ? 'is-active' : ''}`} type="button" title={t('Select or edit a box')} aria-label={t('Select or edit a box')} disabled={!calibration || !measurements.length} onClick={() => setTool('select')}><span className="tool-glyph select-glyph"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v12l3.2-3.1 2.1 4.6 2-.9-2.1-4.5H12z" /></svg></span></button>}
             <button className={`tool-button ${tool === 'pan' ? 'is-active' : ''}`} type="button" title={t('Pan image')} aria-label={t('Pan image')} onClick={() => setTool('pan')}><span className="tool-glyph pan-glyph" /></button>
-          </div>
+          </div>}
+          {calibration && (measurements.length > 0 || manualStart) && <>
           <div className="rail-divider" />
           <div className="rail-group">
             <button className="tool-button" type="button" title={t('Undo last measurement')} aria-label={t('Undo last measurement')} disabled={!calibration || (!measurements.length && !manualStart)} onClick={() => { if (manualStart) { setManualStart(null); setManualDraft(null) } else setMeasurements((items) => items.slice(0, -1)) }}><span className="tool-glyph undo-glyph" /></button>
             <button className="tool-button" type="button" title={t('Clear measurements')} aria-label={t('Clear measurements')} disabled={!calibration || !measurements.length} onClick={clearMeasurements}><span className="tool-glyph clear-glyph" /></button>
           </div>
+          </>}
           <div className="rail-spacer" />
-          <div className="rail-zoom">
+          {imageSize && <div className="rail-zoom">
             <button className="tool-button small-tool" type="button" title={t('Zoom in')} aria-label={t('Zoom in')} onClick={() => setZoom((value) => clampZoom(value * 1.2))}>+</button>
             <span>{Math.round(zoom * 100)}%</span>
             <button className="tool-button small-tool" type="button" title={t('Zoom out')} aria-label={t('Zoom out')} onClick={() => setZoom((value) => clampZoom(value / 1.2))}>−</button>
             <button className="tool-button small-tool fit-button" type="button" title={t('Fit image')} aria-label={t('Fit image')} onClick={setFit}>{t('Fit')}</button>
-          </div>
+          </div>}
         </aside>
 
         <div className="image-column">
@@ -1087,13 +1185,13 @@ function App() {
               <span className="context-value">{imageSize ? `${imageSize.x} × ${imageSize.y} px` : t('Waiting for image')}</span>
             </div>
             <div className="canvas-status"><span className={`tool-dot ${tool}`} />{translateStatus(status, locale)}</div>
-            <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>
-            <button className="tool-button" type="button" title={t('Crop and resample before calibration')} aria-label={t('Crop and resample')} disabled={!imageSize || !!calibration || !!measurements.length} onClick={() => setProcessingOpen(true)}><Crop size={17} /></button>
+            {imageSize && <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>}
+            {imageSize && !calibration && measurements.length === 0 && <button className={`tool-button ${processingOpen ? 'is-active' : ''}`} type="button" title={t('Crop and resample before calibration')} aria-label={t('Crop and resample')} aria-pressed={processingOpen} onClick={() => processingOpen ? setProcessingOpen(false) : openCrop()}><Crop size={17} /></button>}
           </div>
-          <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
+          {calibration && boxMeasurements.length > 0 && <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
             <span className="eyebrow">{t('MYCOLOGICAL SUMMARY · D1–D9 PERCENTILES')}</span>
             <strong>{mycologicalTitle}</strong>
-          </section>
+          </section>}
           <div className={`canvas-wrap ${!imageSize ? 'is-empty' : ''}`} ref={viewRef}>
             {imageUrl ? (
               <canvas
@@ -1115,6 +1213,19 @@ function App() {
                 <span className="supported-types">TIFF · PNG · JPEG · WEBP</span>
               </button>
             )}
+            {processingOpen && imageSize && cropViewTransform && <div className="crop-workspace-overlay" onPointerDown={cropPointerDown} onPointerMove={cropPointerMove} onPointerUp={(event) => { if (cropDragRef.current?.pointerId === event.pointerId) cropDragRef.current = null }} onPointerCancel={() => { cropDragRef.current = null }} onLostPointerCapture={() => { cropDragRef.current = null }}>
+              <div className="crop-outline" style={{ left: cropViewTransform.left + crop.x * cropViewTransform.scale, top: cropViewTransform.top + crop.y * cropViewTransform.scale, width: crop.width * cropViewTransform.scale, height: crop.height * cropViewTransform.scale }}>
+                {(Object.keys(cropHandleLabels) as CropHandle[]).map((handle) => <button key={handle} className={handle === 'move' ? 'crop-move' : `crop-handle crop-handle-${handle}`} type="button" data-crop-handle={handle} aria-label={t(cropHandleLabels[handle])} title={t(cropHandleLabels[handle])} disabled={cropBusy} onKeyDown={(event) => {
+                  if (cropBusy) return
+                  const directions: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }
+                  const direction = directions[event.key]
+                  if (!direction) return
+                  event.preventDefault()
+                  const step = event.shiftKey ? 10 : 1
+                  setCrop(adjustImageCrop(crop, handle, direction[0] * step, direction[1] * step, imageSize.x, imageSize.y))
+                }}>{handle === 'move' && <Move size={20} aria-hidden="true" />}</button>)}
+              </div>
+            </div>}
             {calibrationDraft && calibrationLocked && distance(calibrationDraft.start, calibrationDraft.end) > 0 && (
               <form className="calibration-popover" onSubmit={saveCalibration}>
                 {!calibrationEntering ? (
@@ -1148,12 +1259,13 @@ function App() {
           <div className="panel-heading">
             <div>
               <span className="eyebrow">{t('ANALYSIS')}</span>
-              <h1>{t('Measurements')}</h1>
+              <h1>{t(processingOpen ? 'Crop and resample' : calibration || measurements.length ? 'Measurements' : imageSize ? 'Image scale' : setSnapshots.length ? 'Measurement set' : 'Open image')}</h1>
             </div>
-            <span className="count-badge">{measurements.length.toString().padStart(2, '0')}</span>
+            {measurements.length > 0 && <span className="count-badge">{measurements.length.toString().padStart(2, '0')}</span>}
           </div>
 
-          <section className="scale-section">
+          {processingOpen && imageRef.current ? <ImageProcessingPanel image={imageRef.current} crop={crop} onCropChange={setCrop} reduction={reduction} onReductionChange={setReduction} onApply={processImage} onClose={() => setProcessingOpen(false)} t={t} /> : <>
+          {imageSize && <section className="scale-section">
             <div className="section-title"><span>{t('Image scale')}</span><button className="text-button" type="button" onClick={() => { setTool('calibrate'); setCalibrationDraft(null); setCalibrationLocked(false); setStatus('Click two points on a known scale bar') }}>{t('Calibrate')}</button></div>
             <div className={`scale-readout ${calibration ? 'is-calibrated' : ''}`}>
               <span className="scale-symbol" aria-hidden="true">↔</span>
@@ -1161,9 +1273,9 @@ function App() {
               <span className="scale-state">{t(calibration ? 'SET' : 'UNSET')}</span>
             </div>
             <p className="scale-note">{t(calibration ? 'Scale applies to all measurements in this image.' : 'Set a scale to convert pixels into real units.')}</p>
-          </section>
+          </section>}
 
-          <section className="detection-settings" aria-labelledby="detection-settings-title">
+          {calibration && <section className="detection-settings" aria-labelledby="detection-settings-title">
             <div className="section-title">
               <span id="detection-settings-title">{t('Detection settings')}</span>
               <button ref={previewButtonRef} className="text-button detection-preview-open" type="button" disabled={!imageSize || detecting} onClick={() => setPreviewOpen(true)}>{t('Detection preview')}</button>
@@ -1183,46 +1295,43 @@ function App() {
               <label className="detection-field">
                 <span>{t('Minimum dimensions')}</span>
                 <div className="detection-dimensions">
-                  <input aria-label={t('Minimum width')} type="number" min="0" step="any" value={minimumWidth} disabled={!calibration || detecting} required onChange={(event) => setMinimumWidth(event.target.value)} />
+                  <input aria-label={t('Minimum width')} type="number" min="1" step="1" value={minimumWidth} disabled={!calibration || detecting} required onChange={(event) => setMinimumWidth(event.target.value)} onBlur={() => { if (minimumWidth.trim() !== '' && Number.isFinite(Number(minimumWidth))) setMinimumWidth(formatDetectionDimension(Number(minimumWidth))) }} />
                   <span aria-hidden="true">×</span>
-                  <input aria-label={t('Minimum height')} type="number" min="0" step="any" value={minimumHeight} disabled={!calibration || detecting} required onChange={(event) => setMinimumHeight(event.target.value)} />
+                  <input aria-label={t('Minimum height')} type="number" min="1" step="1" value={minimumHeight} disabled={!calibration || detecting} required onChange={(event) => setMinimumHeight(event.target.value)} onBlur={() => { if (minimumHeight.trim() !== '' && Number.isFinite(Number(minimumHeight))) setMinimumHeight(formatDetectionDimension(Number(minimumHeight))) }} />
                 </div>
               </label>
               <label className="detection-field">
                 <span>{t('Maximum dimensions')}</span>
                 <div className="detection-dimensions">
-                  <input aria-label={t('Maximum width')} type="number" min="0" step="any" value={maximumWidth} disabled={!calibration || detecting} required onChange={(event) => setMaximumWidth(event.target.value)} />
+                  <input aria-label={t('Maximum width')} type="number" min="1" step="1" value={maximumWidth} disabled={!calibration || detecting} required onChange={(event) => setMaximumWidth(event.target.value)} onBlur={() => { if (maximumWidth.trim() !== '' && Number.isFinite(Number(maximumWidth))) setMaximumWidth(formatDetectionDimension(Number(maximumWidth))) }} />
                   <span aria-hidden="true">×</span>
-                  <input aria-label={t('Maximum height')} type="number" min="0" step="any" value={maximumHeight} disabled={!calibration || detecting} required onChange={(event) => setMaximumHeight(event.target.value)} />
+                  <input aria-label={t('Maximum height')} type="number" min="1" step="1" value={maximumHeight} disabled={!calibration || detecting} required onChange={(event) => setMaximumHeight(event.target.value)} onBlur={() => { if (maximumHeight.trim() !== '' && Number.isFinite(Number(maximumHeight))) setMaximumHeight(formatDetectionDimension(Number(maximumHeight))) }} />
                 </div>
               </label>
             </div>
-            {!detectionLimitsValid && <p className="detection-settings-error" role="alert">{t('Dimensions must be positive; maximum area must be at least minimum.')}</p>}
-          </section>
+            {calibration && !detectionLimitsValid && <p className="detection-settings-error" role="alert">{t('Dimensions must be positive; maximum area must be at least minimum.')}</p>}
+          </section>}
 
-          <section className="results-section">
-            <div className="section-title"><span>{t('Measurements')}</span><button className="text-button" type="button" onClick={exportRawCsv} disabled={!calibration || !measurements.length} title={t('Length and width values only')}>{t('Export CSV')}</button></div>
+          {(calibration || measurements.length > 0) && <section className="results-section">
+            <div className="section-title"><span>{t('Measurements')}</span>{calibration && measurements.length > 0 && <button className="text-button" type="button" onClick={exportRawCsv} title={t('Length and width values only')}>{t('Export CSV')}</button>}</div>
             {measurements.length ? (
               <ol className="measurement-list">
                 {[...measurements].reverse().map((measurement) => {
-                  const box = measurement.kind === 'box' ? normalizeOrientedBox(measurement.rect) : null
-                  const q = box ? box.width / Math.max(1, box.height) : null
-                  const lengthShorter = box !== null && box.width < box.height
+                  const box = measurement.kind === 'box' ? longAxisFirst(measurement.rect) : null
+                  const q = box ? box.width / box.height : null
                   return (
-                    <li className={`measurement-row ${lengthShorter ? 'is-warning' : ''}`} key={measurement.id}>
-                      <button className="measurement-open" type="button" disabled={!calibration} onClick={() => openMeasurementEditor(measurement)} aria-label={`${t('Edit {name}', { name: measurement.name })}${lengthShorter ? t(' (warning: length is shorter than width)') : ''}`}>
+                    <li className="measurement-row" key={measurement.id}>
+                      <button className="measurement-open" type="button" disabled={!calibration} onClick={() => openMeasurementEditor(measurement)} aria-label={t('Edit {name}', { name: measurement.name })}>
                         <span className="measurement-index">{measurement.name}</span>
                         <span className="measurement-detail">
                           <strong>{measurement.kind === 'distance'
                             ? calibration ? formatLength(measurement.pixels / calibration.pixelsPerUnit) : measurement.pixels.toFixed(1)
-                            : calibration ? `${formatLength(measurement.rect.width / calibration.pixelsPerUnit)} × ${formatLength(measurement.rect.height / calibration.pixelsPerUnit)}` : `${measurement.rect.width.toFixed(0)} × ${measurement.rect.height.toFixed(0)}`}</strong>
+                            : calibration ? `${formatLength(box!.width / calibration.pixelsPerUnit)} × ${formatLength(box!.height / calibration.pixelsPerUnit)}` : `${box!.width.toFixed(0)} × ${box!.height.toFixed(0)}`}</strong>
                           <small>{measurement.kind === 'distance'
                             ? `${calibration?.unit ?? 'px'} · ${measurement.pixels.toFixed(1)} px`
-                            : `L × W ${calibration?.unit ?? 'px'} · ${measurement.rect.width.toFixed(0)} × ${measurement.rect.height.toFixed(0)} px · Q ${q?.toFixed(2)}`}</small>
+                            : `L × W ${calibration?.unit ?? 'px'} · ${box!.width.toFixed(0)} × ${box!.height.toFixed(0)} px · Q ${q?.toFixed(2)}`}</small>
                         </span>
-                        {lengthShorter && <span className="measurement-warning" title={t('Q < 1: length is shorter than width')} aria-hidden="true">⚠</span>}
                       </button>
-                      {measurement.kind === 'box' && <button className="swap-button" type="button" disabled={!calibration} title={t('Swap length and width')} aria-label={t('Swap length and width for {name}', { name: measurement.name })} onClick={() => setMeasurements((items) => items.map((item) => item.id === measurement.id && item.kind === 'box' ? { ...item, rect: swapBoxAxes(item.rect) } : item))}><span aria-hidden="true">↕</span></button>}
                       <button className="remove-button" type="button" disabled={!calibration} title={t('Remove {name}', { name: measurement.name })} aria-label={t('Remove {name}', { name: measurement.name })} onClick={() => setMeasurements((items) => items.filter((item) => item.id !== measurement.id))}>×</button>
                     </li>
                   )
@@ -1231,9 +1340,9 @@ function App() {
             ) : (
               <div className="no-results"><span className="no-results-mark" aria-hidden="true">＋</span><span>{t('No measurements yet')}</span></div>
             )}
-          </section>
+          </section>}
 
-          <section className="overview-section" aria-labelledby="overview-title">
+          {calibration && boxMeasurements.length > 0 && <section className="overview-section" aria-labelledby="overview-title">
             <div className="section-title"><span id="overview-title">{t('Spore overview')}</span><span className="overview-n">N = {boxMeasurements.length}</span></div>
             <div className="overview-table" role="table" aria-label={t('Spore size and Q summary')}>
               <div className="overview-row overview-header" role="row"><span role="columnheader">{t('Metric')}</span><span role="columnheader">{t('Mean ± SD')}</span><span role="columnheader">D1–D9</span></div>
@@ -1241,20 +1350,20 @@ function App() {
               <div className="overview-row" role="row"><span role="rowheader">{t('Width')}</span><span role="cell">{formatSummary(widthStats, measurementUnit)}</span><span role="cell">{formatDeciles(widthStats, measurementUnit)}</span></div>
               <div className="overview-row" role="row"><span role="rowheader">Q</span><span role="cell">{formatSummary(qStats, '')}</span><span role="cell">{formatDeciles(qStats, '')}</span></div>
             </div>
-            <p className="overview-note">{t('Length and width follow each measurement (use the swap control to exchange them); Q = length ÷ width. SD uses n−1; D1–D9 are interpolated 10th–90th percentiles, with observed extremes in parentheses.')}</p>
-          </section>
+            <p className="overview-note">{t('Q = length ÷ width. SD uses n−1; D1–D9 are interpolated 10th–90th percentiles, with observed extremes in parentheses.')}</p>
+          </section>}
 
-          <section className="overview-section measurement-set-section" aria-labelledby="measurement-set-title">
-            <div className="section-title"><span id="measurement-set-title">{t('Measurement set')}</span><span className="overview-n">{t('{count} images · N = {total}', { count: measurementSet.length, total: setBoxes.length })}</span></div>
+          {(setSnapshots.length > 0 || (calibration && measurements.length > 0)) && <section className="overview-section measurement-set-section" aria-labelledby="measurement-set-title">
+            <div className="section-title"><span id="measurement-set-title">{t('Measurement set')}</span><div className="set-header-actions"><span className="overview-n">{t('{count} images · N = {total}', { count: measurementSet.length, total: setBoxes.length })}</span><button className="tool-button" type="button" title={t('Close image and set')} aria-label={t('Close image and set')} onClick={closeCurrentWork}><X size={16} /></button></div></div>
             <div className="set-name-field"><input aria-label={t('Set name')} placeholder={t('Set name')} value={setName} onChange={(event) => setSetName(event.target.value)} /><button className="tool-button" type="button" title={t('New set')} aria-label={t('New set')} onClick={newSet}><Plus size={17} /></button></div>
-            <button className="button set-save-button" type="button" onClick={saveImageToSet} disabled={!calibration || !measurements.length}>
+            {calibration && measurements.length > 0 && <button className="button set-save-button" type="button" onClick={saveImageToSet}>
               <span aria-hidden="true">{currentImageInSet ? '↻' : '+'}</span> {t(currentImageInSet ? 'Update image in set' : 'Add image to set')}
-            </button>
+            </button>}
             {measurementSet.length > 0 && <>
               <ul className="set-image-list" aria-label={t('Images in measurement set')}>
                 {measurementSet.map((image) => (
                   <li key={image.id}>
-                    <button className="set-image-detail set-image-open" type="button" onClick={() => { const record = setSnapshots.find((entry) => entry.id === image.id); if (record) openStoredSession(record) }}><strong title={image.imageName}>{image.imageName}</strong><small>{t('{count} measurements · {pixelsPerUnit} px/{unit}{currentImage}', { count: image.measurements.length, pixelsPerUnit: image.calibration.pixelsPerUnit.toFixed(2), unit: image.calibration.unit, currentImage: image.id === imageId ? t('current image') : '' })}</small></button>
+                    <button className="set-image-detail set-image-open" type="button" onClick={() => { const record = setSnapshots.find((entry) => entry.id === image.id); if (record) openStoredImageRecord(record) }}><strong title={image.imageName}>{image.imageName}</strong><small>{t('{count} measurements · {pixelsPerUnit} px/{unit}{currentImage}', { count: image.measurements.length, pixelsPerUnit: image.calibration.pixelsPerUnit.toFixed(2), unit: image.calibration.unit, currentImage: image.id === imageId ? t('current image') : '' })}</small></button>
                     <button className="remove-button" type="button" title={setSnapshots.length === 1 ? t('Open project cannot be deleted. Open another project first.') : t('Remove {imageName} from set', { imageName: image.imageName })} aria-label={setSnapshots.length === 1 ? t('Open project cannot be deleted. Open another project first.') : t('Remove {imageName} from set', { imageName: image.imageName })} disabled={setSnapshots.length === 1} onClick={() => removeSetImage(image.id)}>×</button>
                   </li>
                 ))}
@@ -1269,24 +1378,27 @@ function App() {
               {setBoxes.length > 0 && <p className="set-summary">{formatMycologicalRange(setLengthStats)} × {formatMycologicalRange(setWidthStats)} {setUnit}, Q = {formatMycologicalNumber(setQStats.min)}–{formatMycologicalNumber(setQStats.max)}; N = {setBoxes.length}, Me = {formatMycologicalMedian(setLengthStats.median)} × {formatMycologicalMedian(setWidthStats.median)} {setUnit}; Qe = {formatMycologicalMedian(setQStats.median)}</p>}
               <div className="set-actions">
                 <button className="text-button" type="button" onClick={() => { const record = activeSet(); void exportProject(record.images, record) }}><Download size={14} />{t('Export set')}</button>
-                <button className="text-button" type="button" title={t('Combined measurement values with source image names; not a session file')} onClick={() => exportCsv(measurementSetCsv(measurementSet, setUnit), 'mycrometer-set.csv')}>{t('Export set CSV')}</button>
+                <button className="text-button" type="button" title={t('Combined measurement values with source image names; not an image record file')} onClick={() => exportCsv(measurementSetCsv(measurementSet, setUnit), 'mycrometer-set.csv')}>{t('Export set CSV')}</button>
                 <button className="text-button" type="button" title={t('Open project cannot be deleted. Open another project first.')} disabled={setSnapshots.length > 0} onClick={() => { void removeProject(setId, 'set') }}>{t('Clear set')}</button>
               </div>
               <div className="summary-line set-total"><span>{t('Set measurements')}</span><strong>{setMeasurementCount}</strong></div>
             </>}
-          </section>
+          </section>}
 
-          <div className="panel-bottom">
-            <div className="summary-line"><span>{t('Total measurements')}</span><strong>{measurements.length}</strong></div>
-            <button className="button button-export" type="button" onClick={exportActiveSession} disabled={!imageBlob} title={t('ZIP with PNG image, calibration, geometry and CSV')}><Download size={16} /> {t('Export session')}</button>
+          {(imageBlob || setSnapshots.length > 0) && <div className="panel-bottom">
+            {(calibration || setSnapshots.length > 0) && <div className="summary-line"><span>{t(setSnapshots.length ? 'Set measurements' : 'Total measurements')}</span><strong>{setSnapshots.length ? setMeasurementCount : measurements.length}</strong></div>}
+            {((calibration && imageBlob) || setSnapshots.length > 0) && <div className="project-export-actions">
+              <button className="button button-export" type="button" onClick={exportActiveProject} disabled={!setSnapshots.length && !imageBlob} title={t(setSnapshots.length ? 'ZIP with all set images, calibrations, geometry and CSV' : 'ZIP with PNG image, calibration, geometry and CSV')}><Download size={16} /> {t(setSnapshots.length ? 'Export set' : 'Export image record')}</button>
+              {setSnapshots.length > 0 && calibration && imageBlob && <button className="text-button" type="button" onClick={exportActiveImageRecord} title={t('ZIP with PNG image, calibration, geometry and CSV')}><Download size={14} />{t('Export current image record')}</button>}
+            </div>}
             <div className="storage-status" role="status"><Save size={13} />{t(imageBlob && !calibration ? 'Not saved - calibration required' : storageStatus)}</div>
-            <p className="storage-warning">{t('Browser storage can be cleared. Export a ZIP backup to keep a separate copy.')}</p>
+            {(calibration || setSnapshots.length > 0) && <p className="storage-warning">{t('Browser storage can be cleared. Export a ZIP backup to keep a separate copy.')}</p>}
             <p className="privacy-note"><span aria-hidden="true">◈</span> {t('Images stay on this device')}</p>
-          </div>
+          </div>}
+          </>}
         </aside>
       </section>
-      {libraryOpen && <ProjectLibrary sessions={savedSessions} sets={savedSets} activeSessionId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredSession} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
-      {processingOpen && imageRef.current && <ImageProcessingDialog image={imageRef.current} onApply={processImage} onClose={() => setProcessingOpen(false)} t={t} />}
+      {libraryOpen && <ProjectLibrary imageRecords={savedImageRecords} sets={savedSets} activeImageRecordId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredImageRecord} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onDeleteMany={removeProjects} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
         {detectionNotice && detectionNotice.imageUrl === imageUrl && <>
           <strong>{t('No object found')}</strong>
@@ -1864,10 +1976,12 @@ function BoxEditorDialog({ image, imageSize, editor, unit, pixelsPerUnit, onChan
 }
 
 export function formatBoxDimensionsText(width: number, height: number, calibration?: { pixelsPerUnit: number, unit: string }) {
+  const length = Math.max(width, height)
+  const breadth = Math.min(width, height)
   if (calibration) {
-    return `${formatLength(width / calibration.pixelsPerUnit)} × ${formatLength(height / calibration.pixelsPerUnit)} ${calibration.unit}`
+    return `${formatLength(length / calibration.pixelsPerUnit)} × ${formatLength(breadth / calibration.pixelsPerUnit)} ${calibration.unit}`
   }
-  return `${width.toFixed(0)} × ${height.toFixed(0)} px`
+  return `${length.toFixed(0)} × ${breadth.toFixed(0)} px`
 }
 
 function formatLength(length: number) {

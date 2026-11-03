@@ -1,4 +1,4 @@
-import { MAX_SESSION_IMAGE_PIXELS } from './measurementCsv'
+import { MAX_IMAGE_RECORD_IMAGE_PIXELS } from './measurementCsv'
 
 export type ImageCrop = { x: number; y: number; width: number; height: number }
 export type CropHandle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw' | 'move'
@@ -19,7 +19,7 @@ export function adjustImageCrop(crop: ImageCrop, handle: CropHandle, deltaX: num
 
 export function imageProcessingSize(width: number, height: number, crop: ImageCrop, reduction: number) {
   if (![width, height, crop.x, crop.y, crop.width, crop.height].every(Number.isInteger) ||
-    width <= 0 || height <= 0 || width * height > MAX_SESSION_IMAGE_PIXELS ||
+    width <= 0 || height <= 0 || width * height > MAX_IMAGE_RECORD_IMAGE_PIXELS ||
     crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0 ||
     crop.x + crop.width > width || crop.y + crop.height > height ||
     !Number.isFinite(reduction) || reduction < 1 || reduction > 1.5) {

@@ -32,16 +32,6 @@ export function longAxisFirst(box: OrientedBox): OrientedBox {
   }
 }
 
-export function swapBoxAxes(box: OrientedBox): OrientedBox {
-  const normalized = normalizeOrientedBox(box)
-  return {
-    ...normalized,
-    width: normalized.height,
-    height: normalized.width,
-    angle: normalizeBoxAngle(normalized.angle + 90),
-  }
-}
-
 export function boxCorners(box: OrientedBox): GeometryPoint[] {
   const normalized = normalizeOrientedBox(box)
   const halfWidth = normalized.width / 2

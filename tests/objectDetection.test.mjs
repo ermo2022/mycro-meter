@@ -16,6 +16,146 @@ function compile(source, imports = require) {
   return module.exports
 }
 
+const appSource = ts.createSourceFile('App.tsx', readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const detectionDeclarations = new Map()
+function collectDetectionDeclarations(node) {
+  if (ts.isVariableDeclaration(node)) detectionDeclarations.set(node.name.getText(appSource), node.getText(appSource))
+  ts.forEachChild(node, collectDetectionDeclarations)
+}
+collectDetectionDeclarations(appSource)
+const detectionHelpers = ['formatDetectionDimension', 'detectionAreaDefaults'].map(name => {
+  const helper = appSource.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name)
+  assert.ok(helper)
+  return helper.getText(appSource)
+})
+const detectionValues = ['detectionPixelsPerUnit', 'minimumWidthValue', 'minimumHeightValue', 'maximumWidthValue', 'maximumHeightValue', 'minimumObjectArea', 'maximumObjectArea', 'detectionLimitsValid']
+const detectionSettings = compile([
+  `const ${detectionDeclarations.get('micrometresPerUnit')};`,
+  ...detectionHelpers,
+  'export function settings(calibration, dimensions, imageWidth = 1000) {',
+  '  const defaults = detectionAreaDefaults(calibration, imageWidth);',
+  '  const { unit: detectionUnit, minimumWidth, minimumHeight, maximumWidth, maximumHeight } = dimensions ?? defaults;',
+  ...detectionValues.map(name => `  const ${detectionDeclarations.get(name)};`),
+  '  return { defaults, minimumObjectArea, maximumObjectArea, detectionLimitsValid };',
+  '}',
+  'export function changeUnit(dimensions, nextUnit) {',
+  '  const { unit: detectionUnit, minimumWidth, minimumHeight, maximumWidth, maximumHeight } = dimensions;',
+  '  const result = { ...dimensions };',
+  '  const setMinimumWidth = value => { result.minimumWidth = value };',
+  '  const setMinimumHeight = value => { result.minimumHeight = value };',
+  '  const setMaximumWidth = value => { result.maximumWidth = value };',
+  '  const setMaximumHeight = value => { result.maximumHeight = value };',
+  '  const setDetectionUnit = value => { result.unit = value };',
+  `  const ${detectionDeclarations.get('changeDetectionUnit')};`,
+  '  changeDetectionUnit(nextUnit);',
+  '  return result;',
+  '}',
+].join('\n'))
+
+test('dimension warning appears only for calibrated invalid limits', () => {
+  let condition
+  function findWarning(node) {
+    if (ts.isJsxElement(node)) {
+      const className = node.openingElement.attributes.properties.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(appSource) === 'className')
+      if (className?.initializer?.text === 'detection-settings-error' && ts.isBinaryExpression(node.parent)) condition = node.parent.left.getText(appSource)
+    }
+    ts.forEachChild(node, findWarning)
+  }
+  findWarning(appSource)
+  assert.ok(condition)
+  const warningVisible = new Function('calibration', 'detectionLimitsValid', `return Boolean(${condition})`)
+  assert.equal(warningVisible(null, false), false)
+  assert.equal(warningVisible(null, true), false)
+  assert.equal(warningVisible({ pixelsPerUnit: 7.62, unit: 'mm' }, true), false)
+  assert.equal(warningVisible({ pixelsPerUnit: 7.62, unit: 'mm' }, false), true)
+})
+
+test('detection defaults round physical dimensions up while retaining the pixel-area floor', () => {
+  for (const calibration of [
+    { pixelsPerUnit: 7.62, unit: 'mm' },
+    { pixelsPerUnit: 0.00762, unit: 'µm' },
+    { pixelsPerUnit: 0.00000762, unit: 'nm' },
+    { pixelsPerUnit: 7.62, unit: 'µm' },
+    { pixelsPerUnit: 7620, unit: 'mm' },
+    { pixelsPerUnit: 1000, unit: 'µm' },
+  ]) {
+    const defaults = detectionSettings.settings(calibration)
+    assert.equal(defaults.detectionLimitsValid, true)
+    const unitSizes = { mm: 1000, 'µm': 1, nm: 0.001 }
+    const pixelsPerUnit = calibration.pixelsPerUnit * unitSizes[defaults.defaults.unit] / unitSizes[calibration.unit]
+    assert.equal(Number(defaults.defaults.minimumWidth), Math.ceil(Math.sqrt(50) / pixelsPerUnit))
+    assert.equal(Number(defaults.defaults.maximumWidth), Math.ceil(100 / pixelsPerUnit))
+    assert.ok(defaults.minimumObjectArea >= 50)
+    assert.ok(defaults.maximumObjectArea >= 10000)
+    const smallImage = detectionSettings.settings(calibration, undefined, 20)
+    assert.equal(smallImage.detectionLimitsValid, true)
+    assert.ok(smallImage.maximumObjectArea >= 200)
+    for (const dimensions of [defaults.defaults, smallImage.defaults]) {
+      for (const name of ['minimumWidth', 'minimumHeight', 'maximumWidth', 'maximumHeight']) {
+        assert.ok(Number.isInteger(Number(dimensions[name])) && Number(dimensions[name]) > 0)
+      }
+    }
+  }
+})
+
+test('changing detection units rounds dimensions up and preserves empty inputs', () => {
+  const dimensions = { unit: 'µm', minimumWidth: '7', minimumHeight: '8', maximumWidth: '100', maximumHeight: '' }
+  assert.deepEqual(detectionSettings.changeUnit(dimensions, 'mm'), { unit: 'mm', minimumWidth: '1', minimumHeight: '1', maximumWidth: '1', maximumHeight: '' })
+  assert.deepEqual(detectionSettings.changeUnit(dimensions, 'nm'), { unit: 'nm', minimumWidth: '7000', minimumHeight: '8000', maximumWidth: '100000', maximumHeight: '' })
+})
+
+test('all detection dimension inputs round upward on blur without replacing empty fields', () => {
+  const inputs = []
+  function collectInputs(node) {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(appSource) === 'input') {
+      const attributes = node.attributes.properties
+      const value = attributes.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(appSource) === 'value')
+      const name = value?.initializer?.expression?.getText(appSource)
+      if (['minimumWidth', 'minimumHeight', 'maximumWidth', 'maximumHeight'].includes(name)) inputs.push({ name, attributes })
+    }
+    ts.forEachChild(node, collectInputs)
+  }
+  collectInputs(appSource)
+  assert.equal(inputs.length, 4)
+  for (const { name, attributes } of inputs) {
+    const blur = attributes.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(appSource) === 'onBlur')
+    const setter = `set${name[0].toUpperCase()}${name.slice(1)}`
+    const helper = detectionHelpers[0]
+    const { outputText } = ts.transpileModule(`${helper}\nconst onBlur = ${blur.initializer.expression.getText(appSource)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } })
+    for (const [value, expected] of [['7.01', '8'], ['7', '7'], ['0.5', '1'], ['', undefined]]) {
+      let rounded
+      new Function(name, setter, `${outputText}; onBlur()`)(value, result => { rounded = result })
+      assert.equal(rounded, expected)
+    }
+  }
+})
+
+test('detection enforces a 50 px² floor across units and rejects an unusable maximum', () => {
+  const unitSizes = { mm: 1000, 'µm': 1, nm: 0.001 }
+  for (const calibration of [
+    { pixelsPerUnit: 7.62, unit: 'mm' },
+    { pixelsPerUnit: 0.00762, unit: 'µm' },
+    { pixelsPerUnit: 0.00000762, unit: 'nm' },
+  ]) {
+    for (const unit of ['mm', 'µm', 'nm']) {
+      const pixelsPerUnit = calibration.pixelsPerUnit * unitSizes[unit] / unitSizes[calibration.unit]
+      const dimensions = { unit, minimumWidth: String(10 / pixelsPerUnit), minimumHeight: String(10 / pixelsPerUnit), maximumWidth: String(100 / pixelsPerUnit), maximumHeight: String(100 / pixelsPerUnit) }
+      assert.equal(detectionSettings.settings(calibration, dimensions).detectionLimitsValid, true)
+      assert.ok(Math.abs(detectionSettings.settings(calibration, dimensions).minimumObjectArea - 100) < 1e-10)
+      const tinyMinimum = { ...dimensions, minimumWidth: String(1 / pixelsPerUnit), minimumHeight: String(1 / pixelsPerUnit) }
+      assert.equal(detectionSettings.settings(calibration, tinyMinimum).minimumObjectArea, 50)
+      assert.equal(detectionSettings.settings(calibration, tinyMinimum).detectionLimitsValid, true)
+      const tinyMaximum = { ...tinyMinimum, maximumWidth: String(5 / pixelsPerUnit), maximumHeight: String(5 / pixelsPerUnit) }
+      assert.equal(detectionSettings.settings(calibration, tinyMaximum).detectionLimitsValid, false)
+      const equalLimits = { ...dimensions, maximumWidth: dimensions.minimumWidth, maximumHeight: dimensions.minimumHeight }
+      assert.equal(detectionSettings.settings(calibration, equalLimits).detectionLimitsValid, true)
+      assert.equal(detectionSettings.settings(calibration, { ...dimensions, minimumWidth: '0' }).detectionLimitsValid, false)
+      assert.equal(detectionSettings.settings(calibration, { ...dimensions, minimumWidth: '' }).detectionLimitsValid, false)
+      assert.equal(detectionSettings.settings(calibration, { ...equalLimits, maximumWidth: String(1 / pixelsPerUnit) }).detectionLimitsValid, false)
+    }
+  }
+})
+
 const geometry = compile(readFileSync(new URL('../src/boxGeometry.ts', import.meta.url), 'utf8'))
 const source = readFileSync(new URL('../src/objectDetection.ts', import.meta.url), 'utf8')
 const { contourBox } = compile(`${source}\nexport { contourBox }`, (name) => {
