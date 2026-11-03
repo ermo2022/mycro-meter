@@ -46,7 +46,7 @@ test('analysis sections appear only when their prerequisite data is available', 
       const label = attributes.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'aria-labelledby')?.initializer?.text
       conditions.set(label ?? className, node.parent.left.getText(source))
       const onClick = attributes.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'onClick')?.initializer?.expression?.getText(source)
-      if (onClick === 'exportActiveSession') conditions.set('current-session-export', node.parent.left.getText(source))
+      if (onClick === 'exportActiveImageRecord') conditions.set('current-image-record-export', node.parent.left.getText(source))
     }
     ts.forEachChild(node, visit)
   }
@@ -68,6 +68,6 @@ test('analysis sections appear only when their prerequisite data is available', 
     [{ image: true, setImages: 2 }, [true, false, false, false, true, true, true, false]],
     [{ image: true, calibrated: true, setImages: 2 }, [true, true, true, false, true, true, true, true]],
   ]) {
-    assert.deepEqual(['scale-section', 'detection-settings-title', 'results-section', 'overview-title', 'measurement-set-title', 'panel-bottom', 'project-export-actions', 'current-session-export'].map(key => visible(key, state)), expected)
+    assert.deepEqual(['scale-section', 'detection-settings-title', 'results-section', 'overview-title', 'measurement-set-title', 'panel-bottom', 'project-export-actions', 'current-image-record-export'].map(key => visible(key, state)), expected)
   }
 })

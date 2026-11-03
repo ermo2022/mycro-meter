@@ -21,7 +21,7 @@ function load(name) {
   return module.exports
 }
 const storage = load('./projectStorage')
-const { measurementSetBoxes, measurementSetCsv, parseSessionCsv, rawMeasurementsCsv, sessionCsv } = load('./measurementCsv')
+const { imageRecordCsv, measurementSetBoxes, measurementSetCsv, parseImageRecordCsv, rawMeasurementsCsv } = load('./measurementCsv')
 const { boxCorners, longAxisFirst } = load('./boxGeometry')
 const { adjustImageCrop, imageProcessingSize, resampleMicroscopeImage } = load('./imageResampler')
 const JSZip = require('jszip')
@@ -49,7 +49,7 @@ test('box dimensions automatically use the long axis in summaries and CSV withou
     const fields = `"${length / 4}","${breadth / 4}","${(length / breadth).toFixed(4)}","mm","${length}","${breadth}","${normalized.angle}"`
     assert.ok(rawMeasurementsCsv([measurement], metadata.calibration).includes(fields))
     assert.ok(measurementSetCsv([entry], 'mm').includes(fields))
-    const restored = parseSessionCsv(sessionCsv([measurement], metadata.calibration, metadata.imageName, { x: 100, y: 80 }))
+    const restored = parseImageRecordCsv(imageRecordCsv([measurement], metadata.calibration, metadata.imageName, { x: 100, y: 80 }))
     assert.deepEqual(restored.measurements[0].rect, normalized)
     assert.equal(measurement.rect.width, width)
     assert.equal(measurement.rect.height, height)
@@ -104,41 +104,62 @@ test('moving a crop preserves its dimensions and clamps it to image bounds', () 
   assert.deepEqual(adjustImageCrop(crop, 'move', -1000, -1000, 200, 150), { x: 0, y: 0, width: 100, height: 80 })
 })
 
-test('IndexedDB stores only calibrated sessions and preserves blobs, snapshots and explicit deletion', async () => {
-  const uncalibrated = storage.createSession('uncalibrated-test', image, { ...metadata, calibration: null, measurements: [] })
-  assert.equal(await storage.saveSession(uncalibrated), null)
-  assert.ok(!(await storage.listProjects()).sessions.some(entry => entry.id === uncalibrated.id))
-  const record = storage.createSession('storage-test', image, metadata)
-  await storage.saveSession(record)
+test('IndexedDB stores only calibrated image records and preserves blobs, snapshots and explicit deletion', async () => {
+  const uncalibrated = storage.createImageRecord('uncalibrated-test', image, { ...metadata, calibration: null, measurements: [] })
+  assert.equal(await storage.saveImageRecord(uncalibrated), null)
+  assert.ok(!(await storage.listProjects()).imageRecords.some(entry => entry.id === uncalibrated.id))
+  const record = storage.createImageRecord('storage-test', image, metadata)
+  await storage.saveImageRecord(record)
   const snapshot = structuredClone(record)
-  const set = { id: 'set-test', name: 'Slides', unit: 'mm', updatedAt: Date.now(), sessionIdsList: [record.id], images: [snapshot] }
+  const set = { id: 'set-test', name: 'Slides', unit: 'mm', updatedAt: Date.now(), imageRecordIdsList: [record.id], images: [snapshot] }
   await storage.saveSet(set)
-  await storage.saveSession(storage.createSession(record.id, image, { ...metadata, measurements: [] }))
-  await storage.saveSession(storage.createSession(record.id, image, { ...metadata, calibration: null, measurements: [] }))
+  await storage.saveImageRecord(storage.createImageRecord(record.id, image, { ...metadata, measurements: [] }))
+  await storage.saveImageRecord(storage.createImageRecord(record.id, image, { ...metadata, calibration: null, measurements: [] }))
   const projects = await storage.listProjects()
-  assert.equal(projects.sessions.find(entry => entry.id === record.id).metadata.measurements.length, 0)
-  assert.deepEqual(projects.sessions.find(entry => entry.id === record.id).metadata.calibration, metadata.calibration)
+  assert.equal(projects.imageRecords.find(entry => entry.id === record.id).metadata.measurements.length, 0)
+  assert.deepEqual(projects.imageRecords.find(entry => entry.id === record.id).metadata.calibration, metadata.calibration)
   assert.equal(projects.sets.find(entry => entry.id === set.id).images[0].metadata.measurements.length, 1)
-  assert.deepEqual(new Uint8Array(await projects.sessions[0].imageBlob.arrayBuffer()), header)
-  await storage.deleteProject(record.id, 'session')
+  assert.deepEqual(new Uint8Array(await projects.imageRecords[0].imageBlob.arrayBuffer()), header)
+  await storage.deleteProject(record.id, 'image-record')
   await storage.deleteProject(set.id, 'set')
-  assert.deepEqual(await storage.listProjects(), { sessions: [], sets: [] })
+  assert.deepEqual(await storage.listProjects(), { imageRecords: [], sets: [] })
+})
+
+test('IndexedDB deletes selected image records and sets together', async () => {
+  const first = storage.createImageRecord('bulk-delete-first', image, metadata)
+  const remaining = storage.createImageRecord('bulk-delete-remaining', image, metadata)
+  await storage.saveImageRecord(first)
+  await storage.saveImageRecord(remaining)
+  await storage.saveSet({
+    id: 'bulk-delete-set', name: 'Slides', unit: 'mm', updatedAt: Date.now(),
+    imageRecordIdsList: [first.id], images: [first],
+  })
+
+  await storage.deleteProjects([
+    { id: first.id, kind: 'image-record' },
+    { id: 'bulk-delete-set', kind: 'set' },
+  ])
+
+  const projects = await storage.listProjects()
+  assert.deepEqual(projects.imageRecords.map((record) => record.id), [remaining.id])
+  assert.deepEqual(projects.sets, [])
+  await storage.deleteProject(remaining.id, 'image-record')
 })
 
 test('IndexedDB reads reject malformed records and regenerate saved CSV from metadata', async () => {
-  const store = require('localforage').createInstance({ name: 'mycrometer', storeName: 'sessions_store', driver: require('localforage').INDEXEDDB })
-  const valid = storage.createSession('tampered-csv-test', image, metadata)
+  const store = require('localforage').createInstance({ name: 'mycrometer', storeName: 'image_records_store', driver: require('localforage').INDEXEDDB })
+  const valid = storage.createImageRecord('tampered-csv-test', image, metadata)
   await store.setItem(valid.id, { ...valid, csv: '=1+1' })
   try {
     const projects = await storage.listProjects()
-    assert.equal(projects.sessions[0].csv, valid.csv)
+    assert.equal(projects.imageRecords[0].csv, valid.csv)
 
     const invalidMetadata = {
       ...metadata,
       measurements: [{ ...metadata.measurements[0], rect: { ...metadata.measurements[0].rect, centerX: 101 } }],
     }
-    const invalid = storage.createSession('invalid-indexeddb-test', image, invalidMetadata)
-    await assert.rejects(storage.saveSession(invalid), /Invalid box geometry/)
+    const invalid = storage.createImageRecord('invalid-indexeddb-test', image, invalidMetadata)
+    await assert.rejects(storage.saveImageRecord(invalid), /Invalid box geometry/)
     await store.setItem(invalid.id, invalid)
     await assert.rejects(storage.listProjects(), /Invalid box geometry/)
   } finally {
@@ -148,10 +169,10 @@ test('IndexedDB reads reject malformed records and regenerate saved CSV from met
 })
 
 test('entry storage estimates include PNG blobs, UTF-8 metadata, CSV and set snapshots', () => {
-  const record = storage.createSession('size-test', image, { ...metadata, imageName: 'microscope-µm.png' })
+  const record = storage.createImageRecord('size-test', image, { ...metadata, imageName: 'microscope-µm.png' })
   const { imageBlob, ...data } = record
   assert.equal(storage.projectStorageBytes(record), imageBlob.size + new TextEncoder().encode(JSON.stringify(data)).length)
-  const set = { id: 'size-set', name: 'Slides', unit: 'mm', updatedAt: 1, sessionIdsList: [record.id, record.id], images: [record, record] }
+  const set = { id: 'size-set', name: 'Slides', unit: 'mm', updatedAt: 1, imageRecordIdsList: [record.id, record.id], images: [record, record] }
   const serializedSet = { ...set, images: [data, data] }
   assert.equal(storage.projectStorageBytes(set), 2 * imageBlob.size + new TextEncoder().encode(JSON.stringify(serializedSet)).length)
   assert.equal(storage.formatStorageBytes(0), '0 B')
@@ -160,19 +181,21 @@ test('entry storage estimates include PNG blobs, UTF-8 metadata, CSV and set sna
   assert.equal(storage.formatStorageBytes(1024 ** 3), '1.0 GiB')
 })
 
-test('session and set ZIP round-trips retain geometry, calibration, PNG and readable CSV', async () => {
-  const record = storage.createSession('zip-test', image, metadata)
+test('image record and set ZIP round-trips retain geometry, calibration, PNG and readable CSV', async () => {
+  const record = storage.createImageRecord('zip-test', image, metadata)
   for (const isSet of [false, true]) {
     const set = isSet ? { name: 'Collection', unit: 'mm' } : undefined
     const blob = await storage.exportProjectBundle([record], set)
     const zip = await JSZip.loadAsync(await blob.arrayBuffer())
+    const manifest = JSON.parse(await zip.file('project_manifest.json').async('string'))
+    assert.equal(manifest.kind, isSet ? 'set' : 'image')
     assert.equal(zip.files['items/item_001/image.png']._data.compressedSize, zip.files['items/item_001/image.png']._data.uncompressedSize)
     assert.ok(zip.file('items/item_001/measurements.csv'))
     if (isSet) assert.ok(zip.file('measurements.csv'))
     const result = await storage.importProjectBundle(blob)
-    assert.deepEqual(result.sessions[0].metadata, metadata)
-    assert.notEqual(result.sessions[0].id, record.id)
-    assert.deepEqual(new Uint8Array(await result.sessions[0].imageBlob.arrayBuffer()), header)
+    assert.deepEqual(result.imageRecords[0].metadata, metadata)
+    assert.notEqual(result.imageRecords[0].id, record.id)
+    assert.deepEqual(new Uint8Array(await result.imageRecords[0].imageBlob.arrayBuffer()), header)
     assert.equal(result.set?.name, isSet ? 'Collection' : undefined)
   }
 })
@@ -192,23 +215,23 @@ test('offline app-shell lookups tolerate Origin variants on static assets', asyn
   assert.deepEqual(options, { ignoreVary: true })
 })
 
-test('empty uncalibrated sessions round-trip without requiring a CSV measurement row', async () => {
+test('empty uncalibrated image records round-trip without requiring a CSV measurement row', async () => {
   const empty = { ...metadata, calibration: null, measurements: [] }
-  const result = await storage.importProjectBundle(await storage.exportProjectBundle([storage.createSession('empty', image, empty)]))
-  assert.deepEqual(result.sessions[0].metadata, empty)
+  const result = await storage.importProjectBundle(await storage.exportProjectBundle([storage.createImageRecord('empty', image, empty)]))
+  assert.deepEqual(result.imageRecords[0].metadata, empty)
 })
 
-test('session CSV import rejects out-of-bounds coordinates and oversized boxes', () => {
-  const boxCsv = sessionCsv(metadata.measurements, metadata.calibration, metadata.imageName, { x: metadata.imageWidth, y: metadata.imageHeight })
-  assert.throws(() => parseSessionCsv(boxCsv.replace('"50","40"', '"101","40"')))
+test('image record CSV import rejects out-of-bounds coordinates and oversized boxes', () => {
+  const boxCsv = imageRecordCsv(metadata.measurements, metadata.calibration, metadata.imageName, { x: metadata.imageWidth, y: metadata.imageHeight })
+  assert.throws(() => parseImageRecordCsv(boxCsv.replace('"50","40"', '"101","40"')))
   const oversized = { ...metadata.measurements[0], rect: { ...metadata.measurements[0].rect, width: 200 } }
-  assert.throws(() => parseSessionCsv(sessionCsv([oversized], metadata.calibration, metadata.imageName, { x: metadata.imageWidth, y: metadata.imageHeight })))
+  assert.throws(() => parseImageRecordCsv(imageRecordCsv([oversized], metadata.calibration, metadata.imageName, { x: metadata.imageWidth, y: metadata.imageHeight })))
   const distance = { id: 2, kind: 'distance', start: { x: -1, y: 20 }, end: { x: 60, y: 20 }, pixels: 61, name: 'D1' }
-  assert.throws(() => parseSessionCsv(sessionCsv([distance], metadata.calibration, metadata.imageName, { x: metadata.imageWidth, y: metadata.imageHeight })))
+  assert.throws(() => parseImageRecordCsv(imageRecordCsv([distance], metadata.calibration, metadata.imageName, { x: metadata.imageWidth, y: metadata.imageHeight })))
 })
 
 test('invalid manifests, duplicate paths, mismatched images and invalid geometry are rejected', async () => {
-  const valid = await storage.exportProjectBundle([storage.createSession('invalid', image, metadata)])
+  const valid = await storage.exportProjectBundle([storage.createImageRecord('invalid', image, metadata)])
   for (const change of ['version', 'path', 'duplicates', 'dimensions', 'geometry', 'missing']) {
     const zip = await JSZip.loadAsync(await valid.arrayBuffer())
     const manifest = JSON.parse(await zip.file('project_manifest.json').async('string'))

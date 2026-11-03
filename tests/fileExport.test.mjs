@@ -31,7 +31,7 @@ test('CSV export opens Save As and writes unchanged content before closing', asy
   let savedBlob
   const fixture = exportFixture(async options => {
     assert.equal(options.id, 'mycrometer-csv')
-    assert.equal(options.suggestedName, 'sample-session.csv')
+    assert.equal(options.suggestedName, 'sample-image-record.csv')
     assert.deepEqual(options.types, [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }])
     return {
       createWritable: async () => ({
@@ -41,7 +41,7 @@ test('CSV export opens Save As and writes unchanged content before closing', asy
     }
   })
   const csv = 'length,width\r\n12,4\r\n'
-  await fixture.downloadCsv(csv, 'sample-session.csv')
+  await fixture.downloadCsv(csv, 'sample-image-record.csv')
   assert.equal(await savedBlob.text(), csv)
   assert.equal(savedBlob.type, 'text/csv')
   assert.deepEqual(events, ['write', 'close'])
@@ -117,10 +117,10 @@ test('ZIP export retains every word of set names and sanitizes filesystem charac
     assert.equal(downloads.at(-1), expected)
   }
   await exportProject(records)
-  assert.equal(downloads.at(-1), 'Slide_1_Field_notes-session.zip')
+  assert.equal(downloads.at(-1), 'Slide_1_Field_notes-image.zip')
 })
 
-test('primary project export selects the complete active set or the current session without a set', () => {
+test('primary project export selects the complete active set or current image record without a set', () => {
   let declaration
   function visit(node) {
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'exportActiveProject') declaration = node
@@ -132,17 +132,17 @@ test('primary project export selects the complete active set or the current sess
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   })
   for (const images of [[], [{ id: 'first' }], [{ id: 'first' }, { id: 'second' }]]) {
-    let sessionExports = 0
+    let imageRecordExports = 0
     const projectExports = []
     const set = { name: 'Named set', images }
-    const exportActiveProject = new Function('setSnapshots', 'exportActiveSession', 'activeSet', 'exportProject', `${outputText}; return exportActiveProject`)(
+    const exportActiveProject = new Function('setSnapshots', 'exportActiveImageRecord', 'activeSet', 'exportProject', `${outputText}; return exportActiveProject`)(
       images,
-      () => { sessionExports += 1 },
+      () => { imageRecordExports += 1 },
       () => set,
       (...args) => { projectExports.push(args) },
     )
     exportActiveProject()
-    assert.equal(sessionExports, images.length ? 0 : 1)
+    assert.equal(imageRecordExports, images.length ? 0 : 1)
     assert.deepEqual(projectExports, images.length ? [[images, set]] : [])
   }
 })

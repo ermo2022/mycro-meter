@@ -6,13 +6,13 @@ export type Measurement =
   | { id: number; kind: 'box'; objectId: string; rect: OrientedBox; name: string }
 
 export const units = ['µm', 'mm', 'nm'] as const
-export const MAX_SESSION_CSV_BYTES = 10 * 1024 * 1024
-export const MAX_SESSION_MEASUREMENTS = 10_000
-export const MAX_SESSION_IMAGE_PIXELS = 40_000_000
+export const MAX_IMAGE_RECORD_CSV_BYTES = 10 * 1024 * 1024
+export const MAX_IMAGE_RECORD_MEASUREMENTS = 10_000
+export const MAX_IMAGE_RECORD_IMAGE_PIXELS = 40_000_000
 export type Unit = (typeof units)[number]
 export type Calibration = { pixelsPerUnit: number; unit: Unit }
 
-export type MeasurementSession = {
+export type ImageMeasurementData = {
   imageName: string
   imageWidth: number
   imageHeight: number
@@ -20,13 +20,13 @@ export type MeasurementSession = {
   measurements: Measurement[]
 }
 
-export type MeasurementSetImage = MeasurementSession & { id: string; calibration: Calibration }
+export type MeasurementSetImage = ImageMeasurementData & { id: string; calibration: Calibration }
 
 const micrometresPerUnit: Record<Unit, number> = { 'µm': 1, mm: 1000, nm: 0.001 }
 
-export function validateMeasurementSession(value: unknown): asserts value is MeasurementSession {
-  if (!value || typeof value !== 'object') throw new Error('Invalid session metadata')
-  const metadata = value as MeasurementSession
+export function validateImageMeasurementData(value: unknown): asserts value is ImageMeasurementData {
+  if (!value || typeof value !== 'object') throw new Error('Invalid image measurement data')
+  const metadata = value as ImageMeasurementData
   const positive = (number: unknown) => typeof number === 'number' && Number.isFinite(number) && number > 0
   const point = (value: unknown) => {
     if (!value || typeof value !== 'object') return false
@@ -37,10 +37,10 @@ export function validateMeasurementSession(value: unknown): asserts value is Mea
   if (typeof metadata.imageName !== 'string' || metadata.imageName.length > 1024 ||
     !Number.isInteger(metadata.imageWidth) || !positive(metadata.imageWidth) ||
     !Number.isInteger(metadata.imageHeight) || !positive(metadata.imageHeight) ||
-    metadata.imageWidth * metadata.imageHeight > MAX_SESSION_IMAGE_PIXELS ||
-    !Array.isArray(metadata.measurements) || metadata.measurements.length > MAX_SESSION_MEASUREMENTS ||
+    metadata.imageWidth * metadata.imageHeight > MAX_IMAGE_RECORD_IMAGE_PIXELS ||
+    !Array.isArray(metadata.measurements) || metadata.measurements.length > MAX_IMAGE_RECORD_MEASUREMENTS ||
     (metadata.calibration !== null && (!metadata.calibration || !positive(metadata.calibration.pixelsPerUnit) || !units.includes(metadata.calibration.unit)))) {
-    throw new Error('Invalid session dimensions, calibration, or measurements')
+    throw new Error('Invalid image dimensions, calibration, or measurements')
   }
   const ids = new Set<number>()
   for (const measurement of metadata.measurements) {
@@ -84,7 +84,7 @@ export function measurementSetBoxes(images: MeasurementSetImage[], unit: Unit) {
 }
 
 const rawHeader = ['Name', 'Type', 'Length', 'Width', 'Q', 'Unit', 'Length_px', 'Width_px', 'Angle_deg']
-const sessionHeader = [...rawHeader, 'Image', 'Image_width_px', 'Image_height_px', 'Pixels_per_unit', 'Center_x_px', 'Center_y_px', 'Start_x_px', 'Start_y_px', 'End_x_px', 'End_y_px']
+const imageRecordHeader = [...rawHeader, 'Image', 'Image_width_px', 'Image_height_px', 'Pixels_per_unit', 'Center_x_px', 'Center_y_px', 'Start_x_px', 'Start_y_px', 'End_x_px', 'End_y_px']
 
 function rawFields(item: Measurement, calibration: Calibration | null): string[] {
   const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
@@ -126,9 +126,9 @@ export function measurementSetCsv(images: MeasurementSetImage[], unit: Unit) {
   ])
 }
 
-export function sessionCsv(measurements: Measurement[], calibration: Calibration | null, imageName: string, imageSize: Point) {
+export function imageRecordCsv(measurements: Measurement[], calibration: Calibration | null, imageName: string, imageSize: Point) {
   return toCsv([
-    sessionHeader,
+    imageRecordHeader,
     ...measurements.map((item) => {
       const box = item.kind === 'box' ? normalizeOrientedBox(item.rect) : null
       const geometry = item.kind === 'box'
@@ -147,7 +147,7 @@ export function sessionCsv(measurements: Measurement[], calibration: Calibration
 }
 
 function parseCsv(text: string): string[][] {
-  if (text.length > MAX_SESSION_CSV_BYTES) throw new Error('Session CSV exceeds the 10 MiB limit')
+  if (text.length > MAX_IMAGE_RECORD_CSV_BYTES) throw new Error('Image record CSV exceeds the 10 MiB limit')
   const rows: string[][] = []
   let row: string[] = []
   let field = ''
@@ -169,7 +169,7 @@ function parseCsv(text: string): string[][] {
       if (char === '\r' && text[index + 1] === '\n') index++
       row.push(field)
       rows.push(row)
-      if (rows.length > MAX_SESSION_MEASUREMENTS + 1) throw new Error('Session CSV exceeds the 10,000 measurement limit')
+      if (rows.length > MAX_IMAGE_RECORD_MEASUREMENTS + 1) throw new Error('Image record CSV exceeds the 10,000 measurement limit')
       row = []
       field = ''
     } else {
@@ -180,17 +180,17 @@ function parseCsv(text: string): string[][] {
     row.push(field)
     rows.push(row)
   }
-  if (rows.length > MAX_SESSION_MEASUREMENTS + 1) throw new Error('Session CSV exceeds the 10,000 measurement limit')
+  if (rows.length > MAX_IMAGE_RECORD_MEASUREMENTS + 1) throw new Error('Image record CSV exceeds the 10,000 measurement limit')
   return rows
 }
 
-export function parseSessionCsv(text: string): MeasurementSession {
+export function parseImageRecordCsv(text: string): ImageMeasurementData {
   const rows = parseCsv(text.replace(/^\uFEFF/, '')).filter((row) => row.some((field) => field.trim() !== ''))
   const [header, ...records] = rows
   if (!header) throw new Error('That CSV is empty')
   const columns = new Map(header.map((name, index) => [name.trim(), index]))
-  if (sessionHeader.some((name) => !columns.has(name))) {
-    throw new Error('That CSV has no saved image geometry · import a session export')
+  if (imageRecordHeader.some((name) => !columns.has(name))) {
+    throw new Error('That CSV has no saved image geometry · import an image record export')
   }
   if (!records.length) throw new Error('That CSV contains no measurements')
 
@@ -207,8 +207,8 @@ export function parseSessionCsv(text: string): MeasurementSession {
   const first = reader(records[0], 2)
   const imageWidth = first.number('Image_width_px')
   const imageHeight = first.number('Image_height_px')
-  if (!Number.isInteger(imageWidth) || !Number.isInteger(imageHeight) || imageWidth <= 0 || imageHeight <= 0 || imageWidth * imageHeight > MAX_SESSION_IMAGE_PIXELS) {
-    throw new Error('Session image dimensions are invalid or exceed 40 megapixels')
+  if (!Number.isInteger(imageWidth) || !Number.isInteger(imageHeight) || imageWidth <= 0 || imageHeight <= 0 || imageWidth * imageHeight > MAX_IMAGE_RECORD_IMAGE_PIXELS) {
+    throw new Error('Image dimensions are invalid or exceed 40 megapixels')
   }
   const unit = first.text('Unit')
   let calibration: Calibration | null = null
@@ -242,7 +242,7 @@ export function parseSessionCsv(text: string): MeasurementSession {
     }
   })
 
-  const session = { imageName: unescapeText(first.text('Image')), imageWidth, imageHeight, calibration, measurements }
-  validateMeasurementSession(session)
-  return session
+  const imageData = { imageName: unescapeText(first.text('Image')), imageWidth, imageHeight, calibration, measurements }
+  validateImageMeasurementData(imageData)
+  return imageData
 }
