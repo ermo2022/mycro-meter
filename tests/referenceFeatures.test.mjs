@@ -6,13 +6,21 @@ import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
 const cv = await require('@techstark/opencv-js')
+let imageSource
+let imageRect
+const browserCv = new Proxy(cv, {
+  get(target, name) {
+    if (name === 'imread') return canvas => extractPatch(cv, imageSource, { ...imageRect, width: canvas.width, height: canvas.height })
+    return target[name]
+  },
+})
 const source = readFileSync(new URL('../src/referenceFeatures.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 })
 const module = { exports: {} }
-new Function('require', 'module', 'exports', outputText)(() => ({}), module, module.exports)
-const { analyzeReferencePatch, extractPatch } = module.exports
+new Function('require', 'module', 'exports', outputText)(() => ({ loadOpenCv: async () => browserCv }), module, module.exports)
+const { analyzeReferencePatch, analyzeReferenceContext, extractPatch, extractReferenceFeatures } = module.exports
 
 function ringPatch(size, outerRadius, innerRadius, spore, hole, background) {
   const data = new Uint8Array(size * size)
@@ -61,5 +69,83 @@ test('extractPatch samples an axis-aligned box without shifting pixels', () => {
   } finally {
     gray.delete()
     patch.delete()
+  }
+})
+
+test('body smoothing changes the outline without changing the appearance histogram', () => {
+  const patch = ringPatch(60, 20, 10, 40, 230, 220)
+  try {
+    const sharp = analyzeReferencePatch(cv, patch, 0)
+    const smooth = analyzeReferencePatch(cv, patch, 3)
+    assert.deepEqual(smooth.histogram, sharp.histogram)
+    assert.notDeepEqual(smooth.outline, sharp.outline)
+    assert.ok(smooth.area > 0)
+    assert.equal(smooth.polarity, sharp.polarity)
+  } finally {
+    patch.delete()
+  }
+})
+
+test('reference context recovers a rim outside the tight box without expanding its histogram', () => {
+  const context = ringPatch(80, 25, 19, 40, 220, 220)
+  const width = 48
+  const padding = 16
+  const tight = context.roi(new cv.Rect(padding, padding, width, width))
+  try {
+    const original = analyzeReferencePatch(cv, tight, 0.5)
+    const recovered = analyzeReferenceContext(cv, context, width, width, padding, 0.5)
+    assert.deepEqual(recovered.histogram, original.histogram)
+    assert.ok(recovered.area > Math.PI * 25 ** 2 * 0.85, `area ${recovered.area}`)
+    assert.ok(recovered.outline.some(point => point.x < padding || point.x >= padding + width))
+    assert.ok(recovered.outline.every(point => point.x > 0 && point.y > 0 && point.x < 79 && point.y < 79))
+  } finally {
+    tight.delete()
+    context.delete()
+  }
+})
+
+test('padded reference ignores background contours touching the search boundary', () => {
+  const context = ringPatch(80, 25, 19, 40, 220, 220)
+  try {
+    for (let row = 0; row < 12; row += 1) {
+      for (let column = 0; column < 12; column += 1) context.ucharPtr(row, column)[0] = 40
+    }
+    const result = analyzeReferenceContext(cv, context, 48, 48, 16, 0.5)
+    assert.ok(result.area > 1600 && result.area < 2300, `area ${result.area}`)
+    assert.ok(result.outline.every(point => point.x >= 14 && point.y >= 14 && point.x <= 66 && point.y <= 66))
+  } finally {
+    context.delete()
+  }
+})
+
+test('rotated padded reference preserves manual geometry and tight-box appearance in source pixels', async () => {
+  const gray = ringPatch(120, 25, 19, 40, 220, 220)
+  imageSource = new cv.Mat()
+  cv.cvtColor(gray, imageSource, cv.COLOR_GRAY2RGBA)
+  imageRect = { centerX: 60, centerY: 60, width: 48, height: 48, angle: 37 }
+  const tightRgba = extractPatch(cv, imageSource, imageRect)
+  const tightGray = new cv.Mat()
+  const originalDocument = globalThis.document
+  globalThis.document = { createElement: () => ({ getContext: () => ({ translate() {}, rotate() {}, drawImage() {} }) }) }
+  try {
+    cv.cvtColor(tightRgba, tightGray, cv.COLOR_RGBA2GRAY)
+    const original = analyzeReferencePatch(cv, tightGray, 0.5)
+    const result = await extractReferenceFeatures({ naturalWidth: 120, naturalHeight: 120 }, imageRect, 0.5 / 48 * 100)
+    assert.equal(result.width, imageRect.width)
+    assert.equal(result.height, imageRect.height)
+    assert.equal(result.q, 1)
+    assert.deepEqual(result.histogram, original.histogram)
+    assert.equal(result.polarity, original.polarity)
+    assert.ok(result.area > 1600, `area ${result.area}`)
+    assert.ok(result.outline.every(point => Math.hypot(point.x - 60, point.y - 60) > 23 && Math.hypot(point.x - 60, point.y - 60) < 27))
+    assert.deepEqual(imageRect, { centerX: 60, centerY: 60, width: 48, height: 48, angle: 37 })
+  } finally {
+    gray.delete()
+    imageSource.delete()
+    imageSource = undefined
+    tightRgba.delete()
+    tightGray.delete()
+    if (originalDocument === undefined) delete globalThis.document
+    else globalThis.document = originalDocument
   }
 })

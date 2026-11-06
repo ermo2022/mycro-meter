@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
 import * as UTIF from 'utif'
-import { Crop, Download, FolderOpen, Move, Plus, Save, X } from 'lucide-react'
+import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react'
 import { adjustImageCrop, resampleMicroscopeImage, type CropHandle, type ImageCrop } from './imageResampler'
 import { createImageRecord, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listProjects, saveImageRecord, saveSet, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 import { ImageProcessingPanel, ProjectLibrary } from './WorkspaceDialogs'
-import { createDetectionPreview, detectClickedObject, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
+import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
 import { extractReferenceFeatures, type ReferenceFeatures } from './referenceFeatures'
-import { findMatchingSpores, type SporeMatchResult } from './sporeMatching'
+import { boxIntersectionOverUnion, DEFAULT_MATCHING_SETTINGS, findMatchingSpores, type MatchingSettings, type SporeMatchResult } from './sporeMatching'
 import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, type BoxHandle, type OrientedBox } from './boxGeometry'
-import { MAX_IMAGE_RECORD_CSV_BYTES, MAX_IMAGE_RECORD_IMAGE_PIXELS, measurementSetBoxes, measurementSetCsv, parseImageRecordCsv, rawMeasurementsCsv, units, type Calibration, type ImageMeasurementData, type Measurement, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
+import { detectionsToMeasurements, imageRecordCsv, MAX_IMAGE_RECORD_CSV_BYTES, MAX_IMAGE_RECORD_IMAGE_PIXELS, MAX_IMAGE_RECORD_MEASUREMENTS, measurementSetBoxes, measurementSetCsv, parseImageRecordCsv, rawMeasurementsCsv, units, type Calibration, type ImageMeasurementData, type Measurement, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
 
 type BoxRectangle = OrientedBox
 type BoxEditorState = { objectId: string; measurementId: number | null; rect: BoxRectangle; nearby?: boolean }
@@ -55,6 +55,8 @@ function translateStatus(status: string, locale: LocaleData) {
   if (acceptedBox) return render('boxAccepted', { dimensions: acceptedBox[1] })
   const matchesFound = status.match(/^Found (\d+) matching spores$/)
   if (matchesFound) return render('matchesFound', { count: matchesFound[1] })
+  const recoveriesFound = status.match(/^Found (\d+) matches · (\d+) tentative recoveries$/)
+  if (recoveriesFound) return render('recoveriesFound', { count: recoveriesFound[1], tentative: recoveriesFound[2] })
   const pendingImageRecord = status.match(/^Image record read · open (.*) to restore (\d+) measurements$/)
   if (pendingImageRecord) return render('pendingImageRecord', { imageName: pendingImageRecord[1], count: pendingImageRecord[2] })
   const imageMismatch = status.match(/^Image is (.*) px, image record expects (.*) px · open (.*)$/)
@@ -305,6 +307,11 @@ function App() {
   const [detecting, setDetecting] = useState(false)
   const [selectingReference, setSelectingReference] = useState(false)
   const [sporeReference, setSporeReference] = useState<{ rect: BoxRectangle; features: ReferenceFeatures | null; matches: SporeMatchResult | null } | null>(null)
+  const [matchingSettings, setMatchingSettings] = useState<MatchingSettings>(DEFAULT_MATCHING_SETTINGS)
+  const [matchingBusy, setMatchingBusy] = useState(false)
+  const [showRejectedOutlines, setShowRejectedOutlines] = useState(false)
+  const [includeTentativeMeasurements, setIncludeTentativeMeasurements] = useState(false)
+  const [recordingDetections, setRecordingDetections] = useState(false)
   const referenceTokenRef = useRef(0)
   const [manualStart, setManualStart] = useState<Point | null>(null)
   const [manualDraft, setManualDraft] = useState<DetectionRegion | null>(null)
@@ -316,6 +323,40 @@ function App() {
     locale.messages[key] ?? locales.en.messages[key] ?? key,
     values,
   )
+  const referenceRect = sporeReference?.rect
+  const exportableDetections = sporeReference?.matches?.matches.filter((match) => includeTentativeMeasurements || !match.recovery) ?? []
+  useEffect(() => {
+    const image = imageRef.current
+    if (!referenceRect || !image) {
+      setMatchingBusy(false)
+      return
+    }
+    const token = ++referenceTokenRef.current
+    const isCurrent = () => referenceTokenRef.current === token && imageRef.current === image
+    setMatchingBusy(true)
+    setSporeReference({ rect: referenceRect, features: null, matches: null })
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const features = await extractReferenceFeatures(image, referenceRect, matchingSettings.smoothing, matchingSettings.sensitivity)
+        if (!isCurrent()) return
+        setSporeReference({ rect: referenceRect, features, matches: null })
+        setStatus('Searching the image for matching spores…')
+        const matches = await findMatchingSpores(image, features, referenceRect, matchingSettings)
+        if (!isCurrent()) return
+        setSporeReference({ rect: referenceRect, features, matches })
+        const tentative = matches.matches.filter((match) => match.recovery).length
+        setStatus(tentative ? `Found ${matches.matches.length - tentative} matches · ${tentative} tentative recoveries` : `Found ${matches.matches.length} matching spores`)
+      })().catch(() => {
+        if (isCurrent()) setStatus('Reference analysis failed · select the reference again')
+      }).finally(() => {
+        if (isCurrent()) setMatchingBusy(false)
+      })
+    }, 250)
+    return () => {
+      window.clearTimeout(timer)
+      if (referenceTokenRef.current === token) referenceTokenRef.current += 1
+    }
+  }, [referenceRect, matchingSettings, imageUrl])
   const interactionRef = useRef({ tool, calibration })
   interactionRef.current = { tool, calibration }
   const detectionPixelsPerUnit = calibration
@@ -464,18 +505,23 @@ function App() {
       if (manualDraft) drawRegion(manualDraft, '#c54831')
 
       if (sporeReference) {
-        sporeReference.matches?.matches.forEach((match) => drawBox(match, match.source === 'direct' ? '#2fbf71' : '#2bb3e6', 2))
-        drawBox(sporeReference.rect, '#e0a800', 3)
-        const outline = sporeReference.features?.outline.map(imageToCanvas) ?? []
-        if (outline.length > 2) {
+        const drawOutline = (points: Point[], color: string, dashed = false, lineWidth = dashed ? 1 : 2) => {
+          const outline = points.map(imageToCanvas)
+          if (outline.length < 3) return
           context.beginPath()
           context.moveTo(outline[0].x, outline[0].y)
           outline.slice(1).forEach((point) => context.lineTo(point.x, point.y))
           context.closePath()
-          context.strokeStyle = '#ffd34d'
-          context.lineWidth = 1.5
+          context.strokeStyle = color
+          context.lineWidth = lineWidth
+          context.setLineDash(dashed ? [3, 3] : [])
           context.stroke()
+          context.setLineDash([])
         }
+        if (showRejectedOutlines) sporeReference.matches?.rejectedOutlines.forEach((outline) => drawOutline(outline, '#dd795d', true))
+        sporeReference.matches?.matches.forEach((match) => drawOutline(match.outline, match.recovery ? '#cf4791' : match.source === 'direct' ? '#2fbf71' : '#2bb3e6', !!match.recovery, 2))
+        drawBox(sporeReference.rect, '#e0a800', 3)
+        drawOutline(sporeReference.features?.outline ?? [], '#ffd34d')
       }
 
       measurements.forEach((measurement, index) => {
@@ -509,7 +555,7 @@ function App() {
     const observer = new ResizeObserver(draw)
     observer.observe(view)
     return () => observer.disconnect()
-  }, [imageSize, zoom, pan, measurements, manualDraft, calibration, calibrationDraft, tool, sporeReference])
+  }, [imageSize, zoom, pan, measurements, manualDraft, calibration, calibrationDraft, tool, sporeReference, showRejectedOutlines])
 
   const applyImageRecord = (imageRecord: ImageMeasurementData) => {
     detectionEpochRef.current += 1
@@ -946,6 +992,42 @@ function App() {
     exportCsv(rawMeasurementsCsv(measurements, calibration), `${exportStem}-measurements.csv`)
   }
 
+  const exportDetectedSpores = () => {
+    if (!calibration || !imageSize || matchingBusy || !exportableDetections.length) return
+    try {
+      const detectedMeasurements = detectionsToMeasurements(exportableDetections)
+      exportCsv(imageRecordCsv(detectedMeasurements, calibration, imageName, imageSize), `${exportStem}-autodetected.csv`)
+    } catch {
+      setStatus('Could not export detected spores')
+    }
+  }
+
+  const recordDetectedSpores = async () => {
+    if (!calibration || matchingBusy || recordingDetections || !exportableDetections.length) return
+    const image = imageRef.current
+    const token = referenceTokenRef.current
+    setRecordingDetections(true)
+    try {
+      const cv = await loadOpenCv()
+      if (imageRef.current !== image || referenceTokenRef.current !== token) return
+      setMeasurements((current) => {
+        const additions: typeof exportableDetections = []
+        const boxes = current.flatMap((measurement) => measurement.kind === 'box' ? [measurement.rect] : [])
+        for (const detection of exportableDetections) {
+          if ([...boxes, ...additions].some((box) => boxIntersectionOverUnion(cv, detection, box) >= 0.5)) continue
+          additions.push(detection)
+        }
+        if (!additions.length || current.length + additions.length > MAX_IMAGE_RECORD_MEASUREMENTS) return current
+        return [...current, ...detectionsToMeasurements(additions, current)]
+      })
+      setStatus('Detected spores recorded · overlapping measurements skipped')
+    } catch {
+      setStatus('Could not record detected spores')
+    } finally {
+      setRecordingDetections(false)
+    }
+  }
+
   const exportProject = async (records: StoredImageRecord[], set?: StoredMeasurementSet) => {
     try {
       const blob = await exportProjectBundle(records, set)
@@ -1084,28 +1166,12 @@ function App() {
     if (!calibration || !boxEditor) return
     const rect = longAxisFirst(boxEditor.rect)
     if (selectingReference) {
-      const image = imageRef.current
-      const token = ++referenceTokenRef.current
+      referenceTokenRef.current += 1
       setSporeReference({ rect, features: null, matches: null })
       setSelectingReference(false)
       setBoxEditor(null)
       setTool('measure')
       setStatus('Analysing reference spore…')
-      if (!image) return
-      const isCurrent = () => referenceTokenRef.current === token && imageRef.current === image
-      setDetecting(true)
-      void (async () => {
-        const features = await extractReferenceFeatures(image, rect)
-        if (!isCurrent()) return
-        setSporeReference({ rect, features, matches: null })
-        setStatus('Searching the image for matching spores…')
-        const matches = await findMatchingSpores(image, features, rect)
-        if (!isCurrent()) return
-        setSporeReference({ rect, features, matches })
-        setStatus(`Found ${matches.matches.length} matching spores`)
-      })().catch(() => {
-        if (isCurrent()) setStatus('Reference analysis failed · select the reference again')
-      }).finally(() => setDetecting(false))
       return
     }
     const existingIndex = measurements.findIndex((measurement) => measurement.id === boxEditor.measurementId)
@@ -1384,7 +1450,7 @@ function App() {
               <span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span>
               <button className="text-button" type="button" onClick={cancelAutoDetect}>{t('Cancel')}</button>
             </div>}
-            {sporeReference && !selectingReference && <div className="auto-detect-reference">
+            {sporeReference && !selectingReference && <div className="auto-detect-reference" aria-busy={matchingBusy}>
               <i aria-hidden="true" />
               <span>{t('Reference spore')}</span>
               <strong>{formatLength(sporeReference.rect.width / calibration.pixelsPerUnit)} × {formatLength(sporeReference.rect.height / calibration.pixelsPerUnit)} {calibration.unit} · Q {(sporeReference.rect.width / sporeReference.rect.height).toFixed(2)}</strong>
@@ -1394,10 +1460,42 @@ function App() {
               {sporeReference.features && <svg className="reference-histogram" viewBox="0 0 255 40" preserveAspectRatio="none" role="img" aria-label={t('Reference grayscale histogram')}>
                 <polyline points={sporeReference.features.histogram.map((value, bin, all) => `${bin},${40 - value / Math.max(...all) * 38}`).join(' ')} />
               </svg>}
+              <fieldset className="matching-controls">
+                <legend>{t('Outline matching')}</legend>
+                <label className="detection-field">
+                  <span>{t('Smoothing')}<output>{matchingSettings.smoothing}%</output></span>
+                  <input aria-label={t('Smoothing')} type="range" min="0" max="8" step="0.5" value={matchingSettings.smoothing} onChange={(event) => setMatchingSettings((current) => ({ ...current, smoothing: Number(event.target.value) }))} />
+                </label>
+                <label className="detection-field">
+                  <span>{t('Boundary sensitivity')}<output>{matchingSettings.sensitivity}/10</output></span>
+                  <input aria-label={t('Boundary sensitivity')} type="range" min="1" max="10" step="1" value={matchingSettings.sensitivity} onChange={(event) => setMatchingSettings((current) => ({ ...current, sensitivity: Number(event.target.value) }))} />
+                </label>
+                <label className="detection-field" title={t('Allowed body-area difference from the reference')}>
+                  <span>{t('Size tolerance')}<output>{matchingSettings.sizeTolerance}%</output></span>
+                  <input aria-label={t('Size tolerance')} type="range" min="5" max="60" step="5" value={matchingSettings.sizeTolerance} onChange={(event) => setMatchingSettings((current) => ({ ...current, sizeTolerance: Number(event.target.value) }))} />
+                </label>
+                <div className="matching-options">
+                  <label><input type="checkbox" checked={!!matchingSettings.relativeContrast} onChange={(event) => setMatchingSettings((current) => ({ ...current, relativeContrast: event.target.checked }))} />{t('Contrast-relative matching')}</label>
+                  <label><input type="checkbox" checked={!!matchingSettings.recoverIncompleteRims} onChange={(event) => setMatchingSettings((current) => ({ ...current, recoverIncompleteRims: event.target.checked }))} />{t('Recover incomplete rims')}</label>
+                </div>
+                <div className="matching-actions">
+                  <label><input type="checkbox" checked={showRejectedOutlines} onChange={(event) => setShowRejectedOutlines(event.target.checked)} />{t('Show rejected outlines')}</label>
+                  <button className="icon-button" type="button" title={t('Reset matching settings')} aria-label={t('Reset matching settings')} onClick={() => { setMatchingSettings({ ...DEFAULT_MATCHING_SETTINGS }); setShowRejectedOutlines(false) }}><RotateCcw size={16} aria-hidden="true" /></button>
+                </div>
+                {matchingBusy && <div className="matching-progress" role="status">{t('Updating outlines...')}</div>}
+              </fieldset>
               {sporeReference.matches && <ul className="spore-match-summary">
-                <li><i className="is-direct" aria-hidden="true" />{t('Direct matches')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'direct').length} / {sporeReference.matches.directCandidates}</strong></li>
-                <li><i className="is-watershed" aria-hidden="true" />{t('Split from clusters')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'watershed').length} · {t('{count} clusters', { count: sporeReference.matches.clusterCandidates })}</strong></li>
+                <li><i className="is-direct" aria-hidden="true" />{t('Direct matches')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'direct' && !match.recovery).length} / {sporeReference.matches.directCandidates}</strong></li>
+                <li><i className="is-watershed" aria-hidden="true" />{t('Split from clusters')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'watershed' && !match.recovery).length} · {t('{count} clusters', { count: sporeReference.matches.clusterCandidates })}</strong></li>
+                {(matchingSettings.relativeContrast || matchingSettings.recoverIncompleteRims) && <li><i className="is-tentative" aria-hidden="true" />{t('Tentative recoveries')}<strong>{sporeReference.matches.matches.filter((match) => match.recovery).length}</strong></li>}
               </ul>}
+              <div className="detection-export-controls">
+                <label><input type="checkbox" checked={includeTentativeMeasurements} onChange={(event) => setIncludeTentativeMeasurements(event.target.checked)} />{t('Include tentative recoveries')}</label>
+                <div className="detection-export-actions">
+                  <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length || measurements.length >= MAX_IMAGE_RECORD_MEASUREMENTS} onClick={() => void recordDetectedSpores()}><Plus size={16} aria-hidden="true" />{t('Record detections')}</button>
+                  <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length} onClick={exportDetectedSpores}><Download size={16} aria-hidden="true" />{t('Export detections CSV')}</button>
+                </div>
+              </div>
               <button className="text-button" type="button" onClick={() => { referenceTokenRef.current += 1; setSporeReference(null); setStatus('Reference spore cleared') }}>{t('Clear reference')}</button>
             </div>}
           </section>}
@@ -1525,6 +1623,11 @@ function App() {
           onChange={setBoxEditor}
           translate={t}
           onAccept={acceptBoxEdit}
+          onDelete={!selectingReference && boxEditor.measurementId !== null && calibration ? () => {
+            setMeasurements((current) => current.filter((measurement) => measurement.id !== boxEditor.measurementId))
+            setBoxEditor(null)
+            setStatus('Measurement deleted')
+          } : undefined}
           onClose={() => {
             setBoxEditor(null)
             setStatus(selectingReference ? 'Click a representative spore to use as the reference' : boxEditor.measurementId === null ? 'Box discarded' : 'Box changes discarded')
@@ -1799,10 +1902,11 @@ type BoxEditorDialogProps = {
   onChange: (editor: BoxEditorState) => void
   translate: (text: string) => string
   onAccept: () => void
+  onDelete?: () => void
   onClose: () => void
 }
 
-function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pixelsPerUnit, onChange, translate: t, onAccept, onClose }: BoxEditorDialogProps) {
+function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pixelsPerUnit, onChange, translate: t, onAccept, onDelete, onClose }: BoxEditorDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const onCloseRef = useRef(onClose)
@@ -2058,6 +2162,7 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
         <footer className="box-editor-footer">
           <span className="box-editor-dimensions">{formatBoxDimensionsText(editor.rect.width, editor.rect.height, { pixelsPerUnit, unit })}</span>
           <div className="box-editor-actions">
+            {onDelete && editor.measurementId !== null && !reference && <button className="button box-editor-delete" type="button" onClick={onDelete}><Trash2 size={16} aria-hidden="true" />{t('Delete')}</button>}
             <button className="button box-editor-cancel" type="button" onClick={onClose}>{t('Cancel')}</button>
             <button className="button button-primary" type="button" onClick={onAccept}>{t(reference ? 'Set as reference' : 'Accept dimensions')}</button>
           </div>

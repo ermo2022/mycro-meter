@@ -22,6 +22,22 @@ export type ImageMeasurementData = {
 
 export type MeasurementSetImage = ImageMeasurementData & { id: string; calibration: Calibration }
 
+export function detectionsToMeasurements(detections: readonly (OrientedBox & { id: string })[], existing: readonly Measurement[] = [], firstId = Date.now()): Measurement[] {
+  if (existing.length + detections.length > MAX_IMAGE_RECORD_MEASUREMENTS) throw new Error('Measurement limit reached')
+  const baseId = existing.reduce((maximum, measurement) => Math.max(maximum, measurement.id + 1), firstId)
+  const firstBoxNumber = existing.reduce((maximum, measurement) => {
+    const number = measurement.kind === 'box' ? measurement.name.match(/^B(\d+)$/) : null
+    return Math.max(maximum, number ? Number(number[1]) + 1 : 1)
+  }, 1)
+  return detections.map((detection, index) => ({
+    id: baseId + index,
+    kind: 'box',
+    objectId: `auto-${baseId}-${index}-${detection.id}`,
+    rect: longAxisFirst(detection),
+    name: `B${firstBoxNumber + index}`,
+  }))
+}
+
 const micrometresPerUnit: Record<Unit, number> = { 'µm': 1, mm: 1000, nm: 0.001 }
 
 export function validateImageMeasurementData(value: unknown): asserts value is ImageMeasurementData {

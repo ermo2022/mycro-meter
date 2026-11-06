@@ -1,12 +1,14 @@
-import { boxCorners, longAxisFirst, normalizeBoxAngle, type OrientedBox } from './boxGeometry'
+import { boxCorners, longAxisFirst, normalizeBoxAngle, type GeometryPoint, type OrientedBox } from './boxGeometry'
 import { loadOpenCv } from './objectDetection'
 import { analyzeReferencePatch, extractPatch, type CvMat, type ReferenceFeatures } from './referenceFeatures'
 
 type OpenCv = typeof import('@techstark/opencv-js')
 type RotatedRect = ReturnType<OpenCv['minAreaRect']>
 
-export type SporeMatch = OrientedBox & { id: string; area: number; q: number; distance: number; source: 'direct' | 'watershed' }
-export type SporeMatchResult = { matches: SporeMatch[]; candidates: number; directCandidates: number; clusterCandidates: number }
+export type SporeMatch = OrientedBox & { id: string; area: number; q: number; distance: number; source: 'direct' | 'watershed'; outline: GeometryPoint[]; recovery?: 'contrast' | 'rim' }
+export type SporeMatchResult = { matches: SporeMatch[]; candidates: number; directCandidates: number; clusterCandidates: number; rejectedOutlines: GeometryPoint[][] }
+export type MatchingSettings = { smoothing: number; sensitivity: number; sizeTolerance: number; relativeContrast?: boolean; recoverIncompleteRims?: boolean }
+export const DEFAULT_MATCHING_SETTINGS: MatchingSettings = { smoothing: 2, sensitivity: 5, sizeTolerance: 45, relativeContrast: true, recoverIncompleteRims: true }
 export type MatchLimits = { minArea: number; maxArea: number; maxDistance: number; qTolerance: number }
 export type MatchTrace = {
   stage: 'generated' | 'framePassed' | 'areaPassed' | 'geometry' | 'segmentAreaPassed' | 'evaluated' | 'rejected'
@@ -15,6 +17,7 @@ export type MatchTrace = {
   areaRatio: number
   reason?: string
   distance?: number
+  relativeDistance?: number
   histogramPassed?: boolean
   qPassed?: boolean
 }
@@ -22,6 +25,7 @@ export type MatchObserver = (event: MatchTrace, contour: CvMat) => void
 export type CandidatePreprocessing = {
   mask?: 'combined' | 'edges' | 'adaptive'
   correctIllumination?: boolean
+  tuning?: MatchingSettings
 }
 export const DEFAULT_CANDIDATE_PREPROCESSING: CandidatePreprocessing = { mask: 'adaptive', correctIllumination: true }
 
@@ -39,9 +43,61 @@ export function bhattacharyyaDistance(first: number[], second: number[]) {
   return Math.sqrt(Math.max(0, 1 - coefficient))
 }
 
+export function normalizeContrastHistogram(histogram: number[]) {
+  const quantile = (probability: number) => {
+    let sum = 0
+    for (let bin = 0; bin < histogram.length; bin += 1) {
+      sum += histogram[bin]
+      if (sum >= probability) return bin
+    }
+    return histogram.length - 1
+  }
+  const low = quantile(0.05)
+  const span = quantile(0.95) - low
+  const normalized = new Array<number>(32).fill(0)
+  for (let bin = 0; bin < histogram.length; bin += 1) {
+    normalized[Math.max(0, Math.min(31, Math.round((bin - low) * 31 / Math.max(1, span))))] += histogram[bin]
+  }
+  return { histogram: normalized, span }
+}
+
+export function rimBoundarySupport(cv: OpenCv, contour: CvMat, hull: CvMat, tolerance: number) {
+  const points = hull.data32S
+  let perimeter = 0
+  let supported = 0
+  for (let index = 0; index < points.length; index += 2) {
+    const next = (index + 2) % points.length
+    const length = Math.hypot(points[next] - points[index], points[next + 1] - points[index + 1])
+    const samples = Math.max(1, Math.ceil(length / 2))
+    for (let sample = 0; sample < samples; sample += 1) {
+      const fraction = (sample + 0.5) / samples
+      const point = new cv.Point(points[index] + (points[next] - points[index]) * fraction, points[index + 1] + (points[next + 1] - points[index + 1]) * fraction)
+      perimeter += length / samples
+      if (Math.abs(cv.pointPolygonTest(contour, point, true)) <= tolerance) supported += length / samples
+    }
+  }
+  return supported / Math.max(1, perimeter)
+}
+
+export function boxIntersectionOverUnion(cv: OpenCv, first: OrientedBox, second: OrientedBox) {
+  if (Math.hypot(first.centerX - second.centerX, first.centerY - second.centerY) > (Math.hypot(first.width, first.height) + Math.hypot(second.width, second.height)) / 2) return 0
+  const polygon = (box: OrientedBox) => cv.matFromArray(4, 1, cv.CV_32FC2, boxCorners(box).flatMap((point) => [point.x, point.y]))
+  const firstPolygon = polygon(first)
+  const secondPolygon = polygon(second)
+  const intersection = new cv.Mat()
+  try {
+    const area = Math.max(0, cv.intersectConvexConvex(firstPolygon, secondPolygon, intersection, true))
+    return area / Math.max(1, first.width * first.height + second.width * second.height - area)
+  } finally {
+    firstPolygon.delete()
+    secondPolygon.delete()
+    intersection.delete()
+  }
+}
+
 export function areaGroup(area: number, referenceArea: number, limits: MatchLimits = DIRECT_LIMITS): 'reject' | 'direct' | 'cluster' {
   const ratio = area / referenceArea
-  if (ratio < NOISE_AREA_RATIO || ratio > OVERSIZE_AREA_RATIO) return 'reject'
+  if (ratio < Math.min(NOISE_AREA_RATIO, limits.minArea) || ratio > OVERSIZE_AREA_RATIO) return 'reject'
   if (ratio > limits.maxArea) return 'cluster'
   return ratio >= limits.minArea ? 'direct' : 'reject'
 }
@@ -162,7 +218,7 @@ export function overlapsReference(box: OrientedBox, referenceBox: OrientedBox, s
   return true
 }
 
-export async function findMatchingSpores(image: HTMLImageElement, reference: ReferenceFeatures, referenceBox: OrientedBox): Promise<SporeMatchResult> {
+export async function findMatchingSpores(image: HTMLImageElement, reference: ReferenceFeatures, referenceBox: OrientedBox, tuning?: MatchingSettings): Promise<SporeMatchResult> {
   const cv = await loadOpenCv()
   const scale = Math.min(1, MAX_PROCESSING_SIDE / Math.max(image.naturalWidth, image.naturalHeight))
   const canvas = document.createElement('canvas')
@@ -174,7 +230,7 @@ export async function findMatchingSpores(image: HTMLImageElement, reference: Ref
 
   const source = cv.imread(canvas)
   try {
-    return matchSporePixels(cv, source, reference, referenceBox, scale, undefined, DEFAULT_CANDIDATE_PREPROCESSING)
+    return matchSporePixels(cv, source, reference, referenceBox, scale, undefined, { ...DEFAULT_CANDIDATE_PREPROCESSING, tuning })
   } finally {
     source.delete()
   }
@@ -214,6 +270,10 @@ export function correctCandidateIllumination(cv: OpenCv, gray: CvMat, referenceW
 
 export function matchSporePixels(cv: OpenCv, source: CvMat, reference: ReferenceFeatures, referenceBox: OrientedBox, scale = 1, observe?: MatchObserver, preprocessing: CandidatePreprocessing = {}): SporeMatchResult {
   const referenceArea = reference.area * scale * scale
+  const tuning = preprocessing.tuning
+  const relativeReference = tuning?.relativeContrast ? normalizeContrastHistogram(reference.histogram) : undefined
+  const directLimits = tuning ? { ...DIRECT_LIMITS, minArea: 1 - tuning.sizeTolerance / 100, maxArea: 1 + tuning.sizeTolerance / 100 } : DIRECT_LIMITS
+  const segmentLimits = tuning ? { ...WATERSHED_LIMITS, minArea: directLimits.minArea, maxArea: directLimits.maxArea } : WATERSHED_LIMITS
   const blockSize = Math.max(11, 2 * Math.round(reference.width * scale) + 1)
   const gray = new cv.Mat()
   const blurred = new cv.Mat()
@@ -224,13 +284,26 @@ export function matchSporePixels(cv: OpenCv, source: CvMat, reference: Reference
   const filled = new cv.Mat(source.rows, source.cols, cv.CV_8UC1, new cv.Scalar(0))
   const outlineContours = new cv.MatVector()
   const blobContours = new cv.MatVector()
+  const rimContours = new cv.MatVector()
   const hierarchy = new cv.Mat()
   const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3))
   const matches: SporeMatch[] = []
+  const rejectedOutlines: GeometryPoint[][] = []
   let candidates = 0
   let directCandidates = 0
   let clusterCandidates = 0
   let corrected: CvMat | undefined
+
+  const outlineOf = (contour: CvMat) => {
+    const outline: GeometryPoint[] = []
+    for (let index = 0; index < contour.data32S.length; index += 2) {
+      outline.push({ x: (contour.data32S[index] + 0.5) / scale, y: (contour.data32S[index + 1] + 0.5) / scale })
+    }
+    return outline
+  }
+  const rejectOutline = (contour: CvMat) => {
+    if (rejectedOutlines.length < 500 && cv.contourArea(contour) >= referenceArea * 0.1) rejectedOutlines.push(outlineOf(contour))
+  }
 
   const trace = (contour: CvMat, stage: MatchTrace['stage'], kind: SporeMatch['source'], details: Partial<MatchTrace> = {}) => {
     if (!observe) return
@@ -243,25 +316,37 @@ export function matchSporePixels(cv: OpenCv, source: CvMat, reference: Reference
     }, contour)
   }
 
-  const evaluate = (contour: CvMat, limits: MatchLimits, kind: SporeMatch['source']) => {
+  const evaluate = (contour: CvMat, limits: MatchLimits, kind: SporeMatch['source'], recovery?: SporeMatch['recovery']) => {
     const box = rotatedRectBox(cv, cv.minAreaRect(contour))
     if (box.height <= 0 || overlapsReference(box, referenceBox, scale)) {
       trace(contour, 'rejected', kind, { reason: box.height <= 0 ? 'zeroHeight' : 'referenceOverlap' })
-      return
+      return false
     }
+    const sourceBox = { ...box, centerX: box.centerX / scale, centerY: box.centerY / scale, width: box.width / scale, height: box.height / scale }
+    if (recovery && matches.some((match) => boxIntersectionOverUnion(cv, sourceBox, match) >= 0.5)) return false
     const patch = extractPatch(cv, gray, box)
     let distance: number
+    let relativeDistance: number | undefined
     try {
-      distance = bhattacharyyaDistance(analyzeReferencePatch(cv, patch).histogram, reference.histogram)
+      const histogram = analyzeReferencePatch(cv, patch).histogram
+      distance = bhattacharyyaDistance(histogram, reference.histogram)
+      if (relativeReference && distance >= limits.maxDistance) {
+        const relative = normalizeContrastHistogram(histogram)
+        if (relative.span >= Math.max(4, relativeReference.span * 0.3)) relativeDistance = bhattacharyyaDistance(relative.histogram, relativeReference.histogram)
+      }
     } finally {
       patch.delete()
     }
     const q = box.width / box.height
+    const histogramPassed = distance < limits.maxDistance || (relativeDistance !== undefined && relativeDistance < limits.maxDistance)
     trace(contour, 'evaluated', kind, {
-      distance, histogramPassed: distance < limits.maxDistance,
+      distance, ...(relativeDistance === undefined ? {} : { relativeDistance }), histogramPassed,
       qPassed: Math.abs(q - reference.q) <= reference.q * limits.qTolerance,
     })
-    if (!isSporeMatch(q, distance, reference, limits)) return
+    if (!histogramPassed || Math.abs(q - reference.q) > reference.q * limits.qTolerance) {
+      rejectOutline(contour)
+      return false
+    }
     matches.push({
       centerX: box.centerX / scale,
       centerY: box.centerY / scale,
@@ -273,16 +358,46 @@ export function matchSporePixels(cv: OpenCv, source: CvMat, reference: Reference
       distance,
       source: kind,
       id: `match-${matches.length + 1}`,
+      outline: outlineOf(contour),
+      ...(recovery ? { recovery } : distance >= limits.maxDistance ? { recovery: 'contrast' as const } : {}),
     })
+    return true
+  }
+
+  const recoverRim = (contour: CvMat) => {
+    if (!tuning?.recoverIncompleteRims || referenceArea <= 0 || cv.contourArea(contour) >= referenceArea * directLimits.minArea) return false
+    const bounds = cv.boundingRect(contour)
+    if (bounds.x <= 0 || bounds.y <= 0 || bounds.x + bounds.width >= source.cols || bounds.y + bounds.height >= source.rows) return false
+    const box = rotatedRectBox(cv, cv.minAreaRect(contour))
+    const q = box.width / box.height
+    if (!Number.isFinite(q) || Math.abs(q - reference.q) > reference.q * directLimits.qTolerance || overlapsReference(box, referenceBox, scale)) return false
+    const hull = new cv.Mat()
+    try {
+      cv.convexHull(contour, hull)
+      const estimatedArea = cv.contourArea(hull)
+      if (estimatedArea < 50 * scale * scale || areaGroup(estimatedArea, referenceArea, directLimits) !== 'direct') return false
+      if (rimBoundarySupport(cv, contour, hull, Math.max(2, reference.height * 0.04) * scale) < 0.7) return false
+      if (!evaluate(contour, directLimits, 'direct', 'rim')) return false
+      candidates += 1
+      directCandidates += 1
+      return true
+    } finally {
+      hull.delete()
+    }
   }
 
   try {
     cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY)
     if (preprocessing.correctIllumination) corrected = correctCandidateIllumination(cv, gray, reference.width * scale)
-    cv.GaussianBlur(corrected ?? gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_REPLICATE)
+    if (tuning?.smoothing === 0) (corrected ?? gray).copyTo(blurred)
+    else if (tuning) {
+      const sigma = Math.max(0.1, reference.height * scale * tuning.smoothing / 100)
+      cv.GaussianBlur(corrected ?? gray, blurred, new cv.Size(0, 0), sigma, sigma, cv.BORDER_REPLICATE)
+    } else cv.GaussianBlur(corrected ?? gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_REPLICATE)
     const otsu = cv.threshold(blurred, otsuBinary, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
     cv.Canny(blurred, edges, otsu * 0.5, otsu)
-    cv.adaptiveThreshold(blurred, adaptive, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, reference.polarity === 'dark' ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY, blockSize, 5)
+    const adaptiveOffset = tuning ? (reference.polarity === 'dark' ? 10 - tuning.sensitivity : tuning.sensitivity) : 5
+    cv.adaptiveThreshold(blurred, adaptive, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, reference.polarity === 'dark' ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY, blockSize, adaptiveOffset)
     if (preprocessing.mask === 'edges') edges.copyTo(combined)
     else if (preprocessing.mask === 'adaptive') adaptive.copyTo(combined)
     else cv.bitwise_or(edges, adaptive, combined)
@@ -299,12 +414,14 @@ export function matchSporePixels(cv: OpenCv, source: CvMat, reference: Reference
         const bounds = cv.boundingRect(contour)
         if (bounds.x <= 0 || bounds.y <= 0 || bounds.x + bounds.width >= source.cols || bounds.y + bounds.height >= source.rows) {
           trace(contour, 'rejected', 'direct', { reason: 'frame' })
+          rejectOutline(contour)
           continue
         }
         trace(contour, 'framePassed', 'direct')
-        const group = areaGroup(cv.contourArea(contour), referenceArea)
+        const group = areaGroup(cv.contourArea(contour), referenceArea, directLimits)
         if (group === 'reject') {
           const ratio = cv.contourArea(contour) / referenceArea
+          rejectOutline(contour)
           trace(contour, 'rejected', 'direct', { reason: ratio < NOISE_AREA_RATIO ? 'areaBelowNoise' : ratio > OVERSIZE_AREA_RATIO ? 'areaAboveMaximum' : 'areaBelowDirect' })
           continue
         }
@@ -314,25 +431,53 @@ export function matchSporePixels(cv: OpenCv, source: CvMat, reference: Reference
           directCandidates += 1
           trace(contour, 'geometry', 'direct')
           trace(contour, 'segmentAreaPassed', 'direct')
-          evaluate(contour, DIRECT_LIMITS, 'direct')
+          evaluate(contour, directLimits, 'direct')
           continue
         }
         clusterCandidates += 1
         const segments = watershedSegments(cv, blurred, contour)
-        if (!segments.length) trace(contour, 'rejected', 'watershed', { reason: 'watershedNoSegments' })
+        if (!segments.length) {
+          trace(contour, 'rejected', 'watershed', { reason: 'watershedNoSegments' })
+          rejectOutline(contour)
+        }
         for (const segment of segments) {
           try {
             trace(segment, 'geometry', 'watershed')
-            if (areaGroup(cv.contourArea(segment), referenceArea, WATERSHED_LIMITS) === 'direct') {
+            if (areaGroup(cv.contourArea(segment), referenceArea, segmentLimits) === 'direct') {
               trace(segment, 'segmentAreaPassed', 'watershed')
-              evaluate(segment, WATERSHED_LIMITS, 'watershed')
-            } else trace(segment, 'rejected', 'watershed', { reason: 'segmentArea' })
+              evaluate(segment, segmentLimits, 'watershed')
+            } else {
+              trace(segment, 'rejected', 'watershed', { reason: 'segmentArea' })
+              rejectOutline(segment)
+            }
           } finally {
             segment.delete()
           }
         }
       } finally {
         contour.delete()
+      }
+    }
+    if (tuning?.recoverIncompleteRims) {
+      for (let index = 0; index < blobContours.size(); index += 1) {
+        const contour = blobContours.get(index)
+        try {
+          recoverRim(contour)
+        } finally {
+          contour.delete()
+        }
+      }
+    }
+    if (tuning?.recoverIncompleteRims && preprocessing.mask !== 'edges') {
+      cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel)
+      cv.findContours(edges, rimContours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+      for (let index = 0; index < rimContours.size(); index += 1) {
+        const contour = rimContours.get(index)
+        try {
+          recoverRim(contour)
+        } finally {
+          contour.delete()
+        }
       }
     }
   } finally {
@@ -346,8 +491,9 @@ export function matchSporePixels(cv: OpenCv, source: CvMat, reference: Reference
     filled.delete()
     outlineContours.delete()
     blobContours.delete()
+    rimContours.delete()
     hierarchy.delete()
     kernel.delete()
   }
-  return { matches, candidates, directCandidates, clusterCandidates }
+  return { matches, candidates, directCandidates, clusterCandidates, rejectedOutlines }
 }
