@@ -5,6 +5,8 @@ import { adjustImageCrop, resampleMicroscopeImage, type CropHandle, type ImageCr
 import { createImageRecord, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listProjects, saveImageRecord, saveSet, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 import { ImageProcessingPanel, ProjectLibrary } from './WorkspaceDialogs'
 import { createDetectionPreview, detectClickedObject, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
+import { extractReferenceFeatures, type ReferenceFeatures } from './referenceFeatures'
+import { findMatchingSpores, type SporeMatchResult } from './sporeMatching'
 import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, type BoxHandle, type OrientedBox } from './boxGeometry'
 import { MAX_IMAGE_RECORD_CSV_BYTES, MAX_IMAGE_RECORD_IMAGE_PIXELS, measurementSetBoxes, measurementSetCsv, parseImageRecordCsv, rawMeasurementsCsv, units, type Calibration, type ImageMeasurementData, type Measurement, type MeasurementSetImage, type Point, type Unit } from './measurementCsv'
 
@@ -51,6 +53,8 @@ function translateStatus(status: string, locale: LocaleData) {
   if (savedSet) return render('savedSet', { imageName: savedSet[1] })
   const acceptedBox = status.match(/^Box accepted · (.*)$/)
   if (acceptedBox) return render('boxAccepted', { dimensions: acceptedBox[1] })
+  const matchesFound = status.match(/^Found (\d+) matching spores$/)
+  if (matchesFound) return render('matchesFound', { count: matchesFound[1] })
   const pendingImageRecord = status.match(/^Image record read · open (.*) to restore (\d+) measurements$/)
   if (pendingImageRecord) return render('pendingImageRecord', { imageName: pendingImageRecord[1], count: pendingImageRecord[2] })
   const imageMismatch = status.match(/^Image is (.*) px, image record expects (.*) px · open (.*)$/)
@@ -299,6 +303,9 @@ function App() {
   const [recoverNearby, setRecoverNearby] = useState(true)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [detecting, setDetecting] = useState(false)
+  const [selectingReference, setSelectingReference] = useState(false)
+  const [sporeReference, setSporeReference] = useState<{ rect: BoxRectangle; features: ReferenceFeatures | null; matches: SporeMatchResult | null } | null>(null)
+  const referenceTokenRef = useRef(0)
   const [manualStart, setManualStart] = useState<Point | null>(null)
   const [manualDraft, setManualDraft] = useState<DetectionRegion | null>(null)
   const [dragOrigin, setDragOrigin] = useState<Point | null>(null)
@@ -456,6 +463,21 @@ function App() {
 
       if (manualDraft) drawRegion(manualDraft, '#c54831')
 
+      if (sporeReference) {
+        sporeReference.matches?.matches.forEach((match) => drawBox(match, match.source === 'direct' ? '#2fbf71' : '#2bb3e6', 2))
+        drawBox(sporeReference.rect, '#e0a800', 3)
+        const outline = sporeReference.features?.outline.map(imageToCanvas) ?? []
+        if (outline.length > 2) {
+          context.beginPath()
+          context.moveTo(outline[0].x, outline[0].y)
+          outline.slice(1).forEach((point) => context.lineTo(point.x, point.y))
+          context.closePath()
+          context.strokeStyle = '#ffd34d'
+          context.lineWidth = 1.5
+          context.stroke()
+        }
+      }
+
       measurements.forEach((measurement, index) => {
         let midpoint: Point
         let value: string
@@ -487,7 +509,7 @@ function App() {
     const observer = new ResizeObserver(draw)
     observer.observe(view)
     return () => observer.disconnect()
-  }, [imageSize, zoom, pan, measurements, manualDraft, calibration, calibrationDraft, tool])
+  }, [imageSize, zoom, pan, measurements, manualDraft, calibration, calibrationDraft, tool, sporeReference])
 
   const applyImageRecord = (imageRecord: ImageMeasurementData) => {
     detectionEpochRef.current += 1
@@ -530,6 +552,8 @@ function App() {
       setImageSize({ x: image.naturalWidth, y: image.naturalHeight })
       setImageUrl(url)
       lastDetectionPointRef.current = null
+      setSelectingReference(false)
+      setSporeReference(null)
       setPreviewOpen(false)
       setImageName(fileName)
       setImageId(restoredId ?? crypto.randomUUID())
@@ -653,6 +677,8 @@ function App() {
     setCalibrationDraft(null)
     setCalibrationLocked(false)
     setMeasurements([])
+    setSelectingReference(false)
+    setSporeReference(null)
     setBoxEditor(null)
     setManualStart(null)
     setManualDraft(null)
@@ -706,13 +732,30 @@ function App() {
       }
       const objectId = `clicked-${crypto.randomUUID()}`
       setBoxEditor({ objectId, measurementId: null, rect: object, nearby: object.nearby })
-      setStatus(object.nearby ? 'Nearby object selected · review the box before accepting' : 'Review the detected box · accept to measure or cancel to discard')
+      setStatus(selectingReference
+        ? 'Refine the reference spore box · accept to set it as the reference'
+        : object.nearby ? 'Nearby object selected · review the box before accepting' : 'Review the detected box · accept to measure or cancel to discard')
     } catch {
       if (isCurrent()) setStatus('Detection failed · try again or drag a manual box')
     } finally {
       pointDetectionRef.current = false
       setDetecting(false)
     }
+  }
+
+  const startAutoDetect = () => {
+    if (!calibration || detecting) return
+    setSelectingReference(true)
+    setTool('measure')
+    setCalibrationDraft(null)
+    setManualStart(null)
+    setManualDraft(null)
+    setStatus('Click a representative spore to use as the reference')
+  }
+
+  const cancelAutoDetect = () => {
+    setSelectingReference(false)
+    setStatus('Reference selection cancelled')
   }
 
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -1032,6 +1075,7 @@ function App() {
       ? longAxisFirst(measurement.rect)
       : boxFromRegion(regionBetween(measurement.start, measurement.end))
     const objectId = measurement.kind === 'box' ? measurement.objectId : `manual-${measurement.id}`
+    setSelectingReference(false)
     setTool('select')
     setBoxEditor({ objectId, measurementId: measurement.id, rect })
   }
@@ -1039,6 +1083,31 @@ function App() {
   const acceptBoxEdit = () => {
     if (!calibration || !boxEditor) return
     const rect = longAxisFirst(boxEditor.rect)
+    if (selectingReference) {
+      const image = imageRef.current
+      const token = ++referenceTokenRef.current
+      setSporeReference({ rect, features: null, matches: null })
+      setSelectingReference(false)
+      setBoxEditor(null)
+      setTool('measure')
+      setStatus('Analysing reference spore…')
+      if (!image) return
+      const isCurrent = () => referenceTokenRef.current === token && imageRef.current === image
+      setDetecting(true)
+      void (async () => {
+        const features = await extractReferenceFeatures(image, rect)
+        if (!isCurrent()) return
+        setSporeReference({ rect, features, matches: null })
+        setStatus('Searching the image for matching spores…')
+        const matches = await findMatchingSpores(image, features)
+        if (!isCurrent()) return
+        setSporeReference({ rect, features, matches })
+        setStatus(`Found ${matches.matches.length} matching spores`)
+      })().catch(() => {
+        if (isCurrent()) setStatus('Reference analysis failed · select the reference again')
+      }).finally(() => setDetecting(false))
+      return
+    }
     const existingIndex = measurements.findIndex((measurement) => measurement.id === boxEditor.measurementId)
     const name = existingIndex >= 0
       ? measurements[existingIndex].name
@@ -1310,6 +1379,27 @@ function App() {
               </label>
             </div>
             {calibration && !detectionLimitsValid && <p className="detection-settings-error" role="alert">{t('Dimensions must be positive; maximum area must be at least minimum.')}</p>}
+            <button className="button auto-detect-button" type="button" disabled={!imageSize || detecting || selectingReference} onClick={startAutoDetect}>{t('Auto-detect')}</button>
+            {selectingReference && <div className="auto-detect-step" role="status">
+              <span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span>
+              <button className="text-button" type="button" onClick={cancelAutoDetect}>{t('Cancel')}</button>
+            </div>}
+            {sporeReference && !selectingReference && <div className="auto-detect-reference">
+              <i aria-hidden="true" />
+              <span>{t('Reference spore')}</span>
+              <strong>{formatLength(sporeReference.rect.width / calibration.pixelsPerUnit)} × {formatLength(sporeReference.rect.height / calibration.pixelsPerUnit)} {calibration.unit} · Q {(sporeReference.rect.width / sporeReference.rect.height).toFixed(2)}</strong>
+              <small>{sporeReference.features
+                ? t('Area {area} {unit}²', { area: formatLength(sporeReference.features.area / calibration.pixelsPerUnit ** 2), unit: calibration.unit })
+                : t('Analysing…')}</small>
+              {sporeReference.features && <svg className="reference-histogram" viewBox="0 0 255 40" preserveAspectRatio="none" role="img" aria-label={t('Reference grayscale histogram')}>
+                <polyline points={sporeReference.features.histogram.map((value, bin, all) => `${bin},${40 - value / Math.max(...all) * 38}`).join(' ')} />
+              </svg>}
+              {sporeReference.matches && <ul className="spore-match-summary">
+                <li><i className="is-direct" aria-hidden="true" />{t('Direct matches')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'direct').length} / {sporeReference.matches.directCandidates}</strong></li>
+                <li><i className="is-watershed" aria-hidden="true" />{t('Split from clusters')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'watershed').length} · {t('{count} clusters', { count: sporeReference.matches.clusterCandidates })}</strong></li>
+              </ul>}
+              <button className="text-button" type="button" onClick={() => { referenceTokenRef.current += 1; setSporeReference(null); setStatus('Reference spore cleared') }}>{t('Clear reference')}</button>
+            </div>}
           </section>}
 
           {(calibration || measurements.length > 0) && <section className="results-section">
@@ -1429,6 +1519,7 @@ function App() {
           image={imageRef.current}
           imageSize={imageSize}
           editor={boxEditor}
+          reference={selectingReference}
           unit={calibration?.unit ?? 'px'}
           pixelsPerUnit={calibration?.pixelsPerUnit ?? 1}
           onChange={setBoxEditor}
@@ -1436,7 +1527,7 @@ function App() {
           onAccept={acceptBoxEdit}
           onClose={() => {
             setBoxEditor(null)
-            setStatus(boxEditor.measurementId === null ? 'Box discarded' : 'Box changes discarded')
+            setStatus(selectingReference ? 'Click a representative spore to use as the reference' : boxEditor.measurementId === null ? 'Box discarded' : 'Box changes discarded')
           }}
         />
       )}
@@ -1702,6 +1793,7 @@ type BoxEditorDialogProps = {
   image: HTMLImageElement
   imageSize: Point
   editor: BoxEditorState
+  reference?: boolean
   unit: Unit | 'px'
   pixelsPerUnit: number
   onChange: (editor: BoxEditorState) => void
@@ -1710,7 +1802,7 @@ type BoxEditorDialogProps = {
   onClose: () => void
 }
 
-function BoxEditorDialog({ image, imageSize, editor, unit, pixelsPerUnit, onChange, translate: t, onAccept, onClose }: BoxEditorDialogProps) {
+function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pixelsPerUnit, onChange, translate: t, onAccept, onClose }: BoxEditorDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const onCloseRef = useRef(onClose)
@@ -1948,7 +2040,7 @@ function BoxEditorDialog({ image, imageSize, editor, unit, pixelsPerUnit, onChan
       <section className="box-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="box-editor-title">
         <header className="box-editor-header">
           <div>
-            <span className="eyebrow">{t('OBJECT BOX')} · {editor.objectId}</span>
+            <span className="eyebrow">{t(reference ? 'REFERENCE SPORE' : 'OBJECT BOX')} · {editor.objectId}</span>
             <h2 id="box-editor-title">{t('Refine oriented box')}</h2>
           </div>
           <button ref={closeButtonRef} className="box-editor-close" type="button" aria-label={t('Cancel box edit')} onClick={onClose}>×</button>
@@ -1967,7 +2059,7 @@ function BoxEditorDialog({ image, imageSize, editor, unit, pixelsPerUnit, onChan
           <span className="box-editor-dimensions">{formatBoxDimensionsText(editor.rect.width, editor.rect.height, { pixelsPerUnit, unit })}</span>
           <div className="box-editor-actions">
             <button className="button box-editor-cancel" type="button" onClick={onClose}>{t('Cancel')}</button>
-            <button className="button button-primary" type="button" onClick={onAccept}>{t('Accept dimensions')}</button>
+            <button className="button button-primary" type="button" onClick={onAccept}>{t(reference ? 'Set as reference' : 'Accept dimensions')}</button>
           </div>
         </footer>
       </section>
