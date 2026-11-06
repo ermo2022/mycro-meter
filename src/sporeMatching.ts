@@ -1,4 +1,4 @@
-import { longAxisFirst, normalizeBoxAngle, type OrientedBox } from './boxGeometry'
+import { boxCorners, longAxisFirst, normalizeBoxAngle, type OrientedBox } from './boxGeometry'
 import { loadOpenCv } from './objectDetection'
 import { analyzeReferencePatch, extractPatch, type CvMat, type ReferenceFeatures } from './referenceFeatures'
 
@@ -8,13 +8,29 @@ type RotatedRect = ReturnType<OpenCv['minAreaRect']>
 export type SporeMatch = OrientedBox & { id: string; area: number; q: number; distance: number; source: 'direct' | 'watershed' }
 export type SporeMatchResult = { matches: SporeMatch[]; candidates: number; directCandidates: number; clusterCandidates: number }
 export type MatchLimits = { minArea: number; maxArea: number; maxDistance: number; qTolerance: number }
+export type MatchTrace = {
+  stage: 'generated' | 'framePassed' | 'areaPassed' | 'geometry' | 'segmentAreaPassed' | 'evaluated' | 'rejected'
+  source: SporeMatch['source']
+  box: OrientedBox
+  areaRatio: number
+  reason?: string
+  distance?: number
+  histogramPassed?: boolean
+  qPassed?: boolean
+}
+export type MatchObserver = (event: MatchTrace, contour: CvMat) => void
+export type CandidatePreprocessing = {
+  mask?: 'combined' | 'edges' | 'adaptive'
+  correctIllumination?: boolean
+}
+export const DEFAULT_CANDIDATE_PREPROCESSING: CandidatePreprocessing = { mask: 'adaptive', correctIllumination: true }
 
 export const DIRECT_LIMITS: MatchLimits = { minArea: 0.7, maxArea: 1.3, maxDistance: 0.3, qTolerance: 0.2 }
 // Watershed segments are held to tighter limits to avoid wishful matches.
 export const WATERSHED_LIMITS: MatchLimits = { minArea: 0.8, maxArea: 1.2, maxDistance: 0.25, qTolerance: 0.15 }
 const NOISE_AREA_RATIO = 0.6
 const OVERSIZE_AREA_RATIO = 4
-const MAX_PROCESSING_SIDE = 3000
+export const MAX_PROCESSING_SIDE = 3000
 
 /** Equivalent to cv.compareHist(HISTCMP_BHATTACHARYYA) for histograms that each sum to 1. */
 export function bhattacharyyaDistance(first: number[], second: number[]) {
@@ -122,7 +138,31 @@ export function watershedSegments(cv: OpenCv, blurred: CvMat, contour: CvMat): C
   }
 }
 
-export async function findMatchingSpores(image: HTMLImageElement, reference: ReferenceFeatures): Promise<SporeMatchResult> {
+export function overlapsReference(box: OrientedBox, referenceBox: OrientedBox, scale: number) {
+  const candidate = boxCorners({
+    ...box,
+    centerX: box.centerX / scale,
+    centerY: box.centerY / scale,
+    width: box.width / scale,
+    height: box.height / scale,
+  })
+  const reference = boxCorners(referenceBox)
+  for (const corners of [candidate, reference]) {
+    for (let index = 0; index < 2; index += 1) {
+      const start = corners[index]
+      const end = corners[index + 1]
+      const axisX = -(end.y - start.y)
+      const axisY = end.x - start.x
+      const candidateProjection = candidate.map((point) => point.x * axisX + point.y * axisY)
+      const referenceProjection = reference.map((point) => point.x * axisX + point.y * axisY)
+      if (Math.max(...candidateProjection) < Math.min(...referenceProjection)
+        || Math.max(...referenceProjection) < Math.min(...candidateProjection)) return false
+    }
+  }
+  return true
+}
+
+export async function findMatchingSpores(image: HTMLImageElement, reference: ReferenceFeatures, referenceBox: OrientedBox): Promise<SporeMatchResult> {
   const cv = await loadOpenCv()
   const scale = Math.min(1, MAX_PROCESSING_SIDE / Math.max(image.naturalWidth, image.naturalHeight))
   const canvas = document.createElement('canvas')
@@ -132,16 +172,56 @@ export async function findMatchingSpores(image: HTMLImageElement, reference: Ref
   if (!context) throw new Error('Canvas is unavailable')
   context.drawImage(image, 0, 0, canvas.width, canvas.height)
 
+  const source = cv.imread(canvas)
+  try {
+    return matchSporePixels(cv, source, reference, referenceBox, scale, undefined, DEFAULT_CANDIDATE_PREPROCESSING)
+  } finally {
+    source.delete()
+  }
+}
+
+export function correctCandidateIllumination(cv: OpenCv, gray: CvMat, referenceWidth: number): CvMat {
+  const sigma = Math.max(3, referenceWidth)
+  const reduction = Math.min(1, 8 / sigma)
+  const small = new cv.Mat()
+  const smooth = new cv.Mat()
+  const background = new cv.Mat()
+  const floatGray = new cv.Mat()
+  const floatBackground = new cv.Mat()
+  const difference = new cv.Mat()
+  const corrected = new cv.Mat()
+  try {
+    cv.resize(gray, small, new cv.Size(Math.max(1, Math.round(gray.cols * reduction)), Math.max(1, Math.round(gray.rows * reduction))), 0, 0, cv.INTER_AREA)
+    cv.GaussianBlur(small, smooth, new cv.Size(0, 0), sigma * reduction, sigma * reduction, cv.BORDER_REPLICATE)
+    cv.resize(smooth, background, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR)
+    gray.convertTo(floatGray, cv.CV_32F)
+    background.convertTo(floatBackground, cv.CV_32F)
+    cv.subtract(floatGray, floatBackground, difference)
+    difference.convertTo(corrected, cv.CV_8U, 1, 128)
+    return corrected
+  } catch (error) {
+    corrected.delete()
+    throw error
+  } finally {
+    small.delete()
+    smooth.delete()
+    background.delete()
+    floatGray.delete()
+    floatBackground.delete()
+    difference.delete()
+  }
+}
+
+export function matchSporePixels(cv: OpenCv, source: CvMat, reference: ReferenceFeatures, referenceBox: OrientedBox, scale = 1, observe?: MatchObserver, preprocessing: CandidatePreprocessing = {}): SporeMatchResult {
   const referenceArea = reference.area * scale * scale
   const blockSize = Math.max(11, 2 * Math.round(reference.width * scale) + 1)
-  const source = cv.imread(canvas)
   const gray = new cv.Mat()
   const blurred = new cv.Mat()
   const otsuBinary = new cv.Mat()
   const edges = new cv.Mat()
   const adaptive = new cv.Mat()
   const combined = new cv.Mat()
-  const filled = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC1, new cv.Scalar(0))
+  const filled = new cv.Mat(source.rows, source.cols, cv.CV_8UC1, new cv.Scalar(0))
   const outlineContours = new cv.MatVector()
   const blobContours = new cv.MatVector()
   const hierarchy = new cv.Mat()
@@ -150,10 +230,25 @@ export async function findMatchingSpores(image: HTMLImageElement, reference: Ref
   let candidates = 0
   let directCandidates = 0
   let clusterCandidates = 0
+  let corrected: CvMat | undefined
+
+  const trace = (contour: CvMat, stage: MatchTrace['stage'], kind: SporeMatch['source'], details: Partial<MatchTrace> = {}) => {
+    if (!observe) return
+    const box = rotatedRectBox(cv, cv.minAreaRect(contour))
+    observe({
+      stage, source: kind,
+      box: { ...box, centerX: box.centerX / scale, centerY: box.centerY / scale, width: box.width / scale, height: box.height / scale },
+      areaRatio: cv.contourArea(contour) / referenceArea,
+      ...details,
+    }, contour)
+  }
 
   const evaluate = (contour: CvMat, limits: MatchLimits, kind: SporeMatch['source']) => {
     const box = rotatedRectBox(cv, cv.minAreaRect(contour))
-    if (box.height <= 0) return
+    if (box.height <= 0 || overlapsReference(box, referenceBox, scale)) {
+      trace(contour, 'rejected', kind, { reason: box.height <= 0 ? 'zeroHeight' : 'referenceOverlap' })
+      return
+    }
     const patch = extractPatch(cv, gray, box)
     let distance: number
     try {
@@ -162,6 +257,10 @@ export async function findMatchingSpores(image: HTMLImageElement, reference: Ref
       patch.delete()
     }
     const q = box.width / box.height
+    trace(contour, 'evaluated', kind, {
+      distance, histogramPassed: distance < limits.maxDistance,
+      qPassed: Math.abs(q - reference.q) <= reference.q * limits.qTolerance,
+    })
     if (!isSporeMatch(q, distance, reference, limits)) return
     matches.push({
       centerX: box.centerX / scale,
@@ -179,11 +278,14 @@ export async function findMatchingSpores(image: HTMLImageElement, reference: Ref
 
   try {
     cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY)
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_REPLICATE)
+    if (preprocessing.correctIllumination) corrected = correctCandidateIllumination(cv, gray, reference.width * scale)
+    cv.GaussianBlur(corrected ?? gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_REPLICATE)
     const otsu = cv.threshold(blurred, otsuBinary, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
     cv.Canny(blurred, edges, otsu * 0.5, otsu)
     cv.adaptiveThreshold(blurred, adaptive, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, reference.polarity === 'dark' ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY, blockSize, 5)
-    cv.bitwise_or(edges, adaptive, combined)
+    if (preprocessing.mask === 'edges') edges.copyTo(combined)
+    else if (preprocessing.mask === 'adaptive') adaptive.copyTo(combined)
+    else cv.bitwise_or(edges, adaptive, combined)
     cv.morphologyEx(combined, combined, cv.MORPH_CLOSE, kernel)
     cv.findContours(combined, outlineContours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     // Spores are solid, so fill outlines before measuring area.
@@ -193,20 +295,38 @@ export async function findMatchingSpores(image: HTMLImageElement, reference: Ref
     for (let index = 0; index < blobContours.size(); index += 1) {
       const contour = blobContours.get(index)
       try {
+        trace(contour, 'generated', 'direct')
         const bounds = cv.boundingRect(contour)
-        if (bounds.x <= 0 || bounds.y <= 0 || bounds.x + bounds.width >= canvas.width || bounds.y + bounds.height >= canvas.height) continue
+        if (bounds.x <= 0 || bounds.y <= 0 || bounds.x + bounds.width >= source.cols || bounds.y + bounds.height >= source.rows) {
+          trace(contour, 'rejected', 'direct', { reason: 'frame' })
+          continue
+        }
+        trace(contour, 'framePassed', 'direct')
         const group = areaGroup(cv.contourArea(contour), referenceArea)
-        if (group === 'reject') continue
+        if (group === 'reject') {
+          const ratio = cv.contourArea(contour) / referenceArea
+          trace(contour, 'rejected', 'direct', { reason: ratio < NOISE_AREA_RATIO ? 'areaBelowNoise' : ratio > OVERSIZE_AREA_RATIO ? 'areaAboveMaximum' : 'areaBelowDirect' })
+          continue
+        }
+        trace(contour, 'areaPassed', 'direct')
         candidates += 1
         if (group === 'direct') {
           directCandidates += 1
+          trace(contour, 'geometry', 'direct')
+          trace(contour, 'segmentAreaPassed', 'direct')
           evaluate(contour, DIRECT_LIMITS, 'direct')
           continue
         }
         clusterCandidates += 1
-        for (const segment of watershedSegments(cv, blurred, contour)) {
+        const segments = watershedSegments(cv, blurred, contour)
+        if (!segments.length) trace(contour, 'rejected', 'watershed', { reason: 'watershedNoSegments' })
+        for (const segment of segments) {
           try {
-            if (areaGroup(cv.contourArea(segment), referenceArea, WATERSHED_LIMITS) === 'direct') evaluate(segment, WATERSHED_LIMITS, 'watershed')
+            trace(segment, 'geometry', 'watershed')
+            if (areaGroup(cv.contourArea(segment), referenceArea, WATERSHED_LIMITS) === 'direct') {
+              trace(segment, 'segmentAreaPassed', 'watershed')
+              evaluate(segment, WATERSHED_LIMITS, 'watershed')
+            } else trace(segment, 'rejected', 'watershed', { reason: 'segmentArea' })
           } finally {
             segment.delete()
           }
@@ -216,7 +336,7 @@ export async function findMatchingSpores(image: HTMLImageElement, reference: Ref
       }
     }
   } finally {
-    source.delete()
+    corrected?.delete()
     gray.delete()
     blurred.delete()
     otsuBinary.delete()

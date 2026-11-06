@@ -1099,7 +1099,7 @@ function App() {
         if (!isCurrent()) return
         setSporeReference({ rect, features, matches: null })
         setStatus('Searching the image for matching spores…')
-        const matches = await findMatchingSpores(image, features)
+        const matches = await findMatchingSpores(image, features, rect)
         if (!isCurrent()) return
         setSporeReference({ rect, features, matches })
         setStatus(`Found ${matches.matches.length} matching spores`)

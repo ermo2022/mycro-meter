@@ -94,6 +94,33 @@ npm run preview
 
 Run the geometry, export, image-processing, and IndexedDB/ZIP round-trip tests with `npm test`.
 
+### Offline Spore Tuning Diagnostics
+
+Extract exported set ZIPs into `measurements/<set-name>/`, preserving each manifest and the item directories containing PNG images and metadata. Accepted boxes are treated as verified single-spore positives regardless of whether they were click-detected, resized, or drawn manually. Unmarked objects are not assumed to be negatives.
+
+An optional `measurements/evaluation.json` records dataset-owner exclusions and stress-case sets with reasons. The supplied profile excludes poor-quality Pluteus items 1 and 2, retaining only item 3. Lactarius remains included as a difficult spiny-spore stress case. Reports show both overall scores including stress cases and standard-set scores without them; excluded images are listed explicitly and never deleted. The current scope contains 78 verified spores in 13 images, including six Lactarius spores. Independent export folders without a profile include every image by default.
+
+```sh
+npm run tune:spores
+npm run tune:spores -- --stages
+npm run tune:spores -- --compare-preprocessing --stages
+npm run tune:spores -- --input measurements --output tuning-results --features-only
+```
+
+The default offline run uses the same OpenCV pixel-processing core as reference-based Auto-detect but retains the original combined-mask pipeline as its historical baseline, trying every marked spore as the golden reference. Browser Auto-detect now uses illumination-corrected adaptive candidates. The offline run writes `tuning-results/report.md` and `report.json` without changing images, measurements, or detector defaults. The output directory must be outside the input dataset. PNG decoding uses the offline-only `pngjs` development dependency, and images are decoded one at a time. No server or browser is needed. `--features-only` skips the slower full-image baseline.
+
+Reports include source-pixel boxes, extracted histograms and Otsu contour-area estimates, within-image ordered reference/target feature differences, current-gate coverage, per-image/per-set recovery, and leave-one-set-out positive-feature diagnostics. Baseline recovery uses one-to-one rotated-box IoU of at least 0.5; the chosen reference and overlapping labels are excluded from the targets. Recall is averaged over references, then images, then sets. The JSON retains all proposed matches and recovered annotation IDs for later review.
+
+The initial five sets contain 89 verified spores in 15 images. Their current set-balanced baseline recall is approximately 20.2%; Q/histogram gates accept 78.2% of labeled-patch pairs, and the direct-area band contains 42.6% of extracted-area ratios. Feature-gate coverage is not full-detector recall, and extracted areas are not ground-truth segmentation masks. Offline patch rotation and downsampling can differ slightly from browser Canvas interpolation.
+
+Use `--stages` for actual pipeline traces. Generated-blob coverage is 98.7%, after frame rejection 70.0%, after area filtering 46.3%, after separate-box geometry 33.5%, after segment-area filtering 32.2%, after histogram filtering 23.7%, and after Q filtering 20.2% (set-balanced). Early stages allow blobs containing marked centers; geometry onward requires one-to-one box IoU >= 0.5. The JSON records each target's first missing stage and relevant contour events. The report distinguishes malformed giant blobs from well-localized boxes rejected by area limits or routed to watershed without producing segments. This is diagnostic instrumentation only; thresholds and detection decisions are unchanged. Stage attribution follows histogram then Q; Q-only survival is also reported separately.
+
+Use `--compare-preprocessing --stages` to compare the original combined mask, edges alone, and adaptive thresholding alone, each with and without illumination correction. Results go to `tuning-results/preprocessing/comparison.md` and `comparison.json`, with individual variant reports and PNG review sheets. Candidate-only illumination correction subtracts a broad Gaussian background estimate (sigma equal to reference length, estimated at reduced resolution), offset by 128; original-pixel reference features and candidate histograms remain unchanged. Area, Q, and histogram limits are identical in all variants. The browser uses the corrected-adaptive variant; this changes reference-based Auto-detect only, not click detection or saved measurements.
+
+The comparison reports recovered/lost annotation comparisons and additional unreviewed proposals relative to baseline. Review sheets show extra proposals, deduplicated approximately across references, with identifiers linked to JSON additions. Boxes overlapping known annotations are labelled separately from unmarked proposals. Unreviewed proposals are not necessarily false positives, and baseline detections also require review; these exports cannot certify precision without exhaustive region annotations or explicit true/false-positive review. Do not choose a preprocessing default solely by positive recall.
+
+The positive-only percentiles are diagnostic, not recommended defaults: widening gates can admit debris, and unmatched detections cannot establish precision without review. Larger sets are valuable if they add independent images/specimens, species, lighting, magnifications, touching spores, and difficult or missed examples. Hold entire sets/specimens out of tuning rather than randomly splitting boxes from one image. To tune precision/recall or threshold/watershed parameters reliably, also review proposed detections as true/false positives or exhaustively mark designated regions. Adding more boxes from the same few images alone does not solve generalization.
+
 ## Install on a phone
 
 Publish the production build (`npm run build`) to a URL served over HTTPS. The development server is not installable as a standalone offline PWA because the service worker is registered only in production builds.
