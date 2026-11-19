@@ -71,3 +71,36 @@ test('analysis sections appear only when their prerequisite data is available', 
     assert.deepEqual(['scale-section', 'detection-settings-title', 'results-section', 'overview-title', 'measurement-set-title', 'panel-bottom', 'project-export-actions', 'current-image-record-export'].map(key => visible(key, state)), expected)
   }
 })
+
+test('box editor deletion removes only the saved measurement and is unavailable for drafts or references', () => {
+  let deleteAttribute
+  function visit(node) {
+    if (ts.isJsxAttribute(node) && node.name.getText(source) === 'onDelete') deleteAttribute = node
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert.ok(deleteAttribute)
+  const expression = deleteAttribute.initializer.expression.getText(source)
+  const { outputText } = ts.transpileModule(`function action(selectingReference, boxEditor, calibration, setMeasurements, setBoxEditor, setStatus) { return (${expression}) }`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  })
+  const createAction = new Function(`${outputText}; return action`)()
+  const original = [{ id: 1, name: 'B1' }, { id: 2, name: 'B2' }, { id: 3, name: 'B3' }]
+  let measurements = original
+  let editor = { measurementId: 2 }
+  let statusText
+  const remove = createAction(false, editor, {}, update => { measurements = update(measurements) }, value => { editor = value }, value => { statusText = value })
+  assert.equal(typeof remove, 'function')
+  remove()
+  assert.deepEqual(measurements, [original[0], original[2]])
+  assert.equal(original.length, 3)
+  assert.equal(editor, null)
+  assert.equal(statusText, 'Measurement deleted')
+  const unused = () => { throw new Error('Unexpected deletion') }
+  assert.equal(createAction(false, { measurementId: null }, {}, unused, unused, unused), undefined)
+  assert.equal(createAction(true, { measurementId: 2 }, {}, unused, unused, unused), undefined)
+  assert.equal(createAction(false, { measurementId: 2 }, null, unused, unused, unused), undefined)
+  const editorDeclaration = source.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'BoxEditorDialog')
+  assert.ok(editorDeclaration.getText(source).includes("onClick={onClose}>{t('Cancel')}"))
+  assert.ok(editorDeclaration.getText(source).includes("onClick={onAccept}"))
+})

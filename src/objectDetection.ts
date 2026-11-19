@@ -15,7 +15,7 @@ type OpenCvModule = OpenCvApi & {
 
 let openCvPromise: Promise<OpenCvApi> | undefined
 
-async function loadOpenCv(): Promise<OpenCvApi> {
+export async function loadOpenCv(): Promise<OpenCvApi> {
   if (!openCvPromise) {
     openCvPromise = (async () => {
       await new Promise<void>((resolve, reject) => {

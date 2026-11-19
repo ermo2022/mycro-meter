@@ -114,10 +114,28 @@ export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onR
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const formRef = useRef<HTMLFormElement>(null)
+
+  useEffect(() => {
+    if (!window.matchMedia('(pointer: fine)').matches) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || event.defaultPrevented || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return
+      const target = event.target
+      const formButton = target instanceof Element && target.closest('button')?.form === formRef.current
+      if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement
+        || formButton
+        || target instanceof HTMLElement && target.isContentEditable) return
+      event.preventDefault()
+      formRef.current?.requestSubmit()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
+
   let output: { width: number; height: number } | null = null
   try { output = imageProcessingSize(image.naturalWidth, image.naturalHeight, crop, reduction) } catch {}
   return <section className="image-processing-panel" aria-label={t('Crop and resample')}>
-    <form className="image-processing-form" onSubmit={(event) => {
+    <form ref={formRef} className="image-processing-form" onSubmit={(event) => {
       event.preventDefault()
       if (!output || busy) return
       setBusy(true)
