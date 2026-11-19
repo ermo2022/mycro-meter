@@ -124,6 +124,7 @@
     "Scale applies to all measurements in this image.": "Scale applies to all measurements in this image.",
     "Set a scale to convert pixels into real units.": "Set a scale to convert pixels into real units.",
     "Detection settings": "Detection settings",
+    "Expert mode": "Expert mode",
     "Contrast sensitivity": "Contrast sensitivity",
     "Detection sensitivity": "Detection sensitivity",
     "Noise reduction": "Noise reduction",

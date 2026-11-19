@@ -248,6 +248,7 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
   const viewRef = useRef<HTMLDivElement>(null)
+  const calibrationLengthInputRef = useRef<HTMLInputElement>(null)
   const measurementGestureRef = useRef<{ pointerId: number; start: Point; moved: boolean } | null>(null)
   const calibrationHandleRef = useRef<{ pointerId: number; key: 'start' | 'end' } | null>(null)
   const touchPointersRef = useRef(new Map<number, Point>())
@@ -289,6 +290,21 @@ function App() {
   const [calibrationLocked, setCalibrationLocked] = useState(false)
   const [calibrationEntering, setCalibrationEntering] = useState(false)
   const [knownLength, setKnownLength] = useState('')
+  useEffect(() => {
+    if (!calibrationDraft || !calibrationLocked) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!/^\d$/.test(event.key) || event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return
+      const target = event.target
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLElement && target.isContentEditable) return
+      event.preventDefault()
+      setKnownLength((current) => calibrationEntering ? `${current}${event.key}` : event.key)
+      setCalibrationEntering(true)
+      window.requestAnimationFrame(() => calibrationLengthInputRef.current?.focus())
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [calibrationDraft, calibrationLocked, calibrationEntering])
   const [calibrationUnit, setCalibrationUnit] = useState<Unit>('µm')
   const [measurements, setMeasurements] = useState<Measurement[]>([])
   const [imageId, setImageId] = useState('')
@@ -301,6 +317,7 @@ function App() {
   const [maximumWidth, setMaximumWidth] = useState('50')
   const [maximumHeight, setMaximumHeight] = useState('50')
   const [detectionSensitivity, setDetectionSensitivity] = useState(8)
+  const [expertMode, setExpertMode] = useState(false)
   const [noiseFilter, setNoiseFilter] = useState<NoiseFilter>('gaussian')
   const [recoverNearby, setRecoverNearby] = useState(true)
   const [previewOpen, setPreviewOpen] = useState(false)
@@ -1371,7 +1388,7 @@ function App() {
                 ) : (<>
                 <label htmlFor="known-length">{t('Known distance')} <button className="text-button" type="button" onClick={() => setCalibrationEntering(false)}>{t('Adjust points')}</button></label>
                 <div className="calibration-fields">
-                  <input id="known-length" type="number" min="0" step="any" value={knownLength} onChange={(event) => setKnownLength(event.target.value)} autoFocus={window.matchMedia('(pointer: fine)').matches} required />
+                  <input ref={calibrationLengthInputRef} id="known-length" type="number" min="0" step="any" value={knownLength} onChange={(event) => setKnownLength(event.target.value)} autoFocus={window.matchMedia('(pointer: fine)').matches} required />
                   <select value={calibrationUnit} onChange={(event) => setCalibrationUnit(event.target.value as Unit)} aria-label={t('Distance unit')}>
                     {units.map((unit) => <option key={unit}>{unit}</option>)}
                   </select>
@@ -1415,11 +1432,17 @@ function App() {
               <span id="detection-settings-title">{t('Detection settings')}</span>
               <button ref={previewButtonRef} className="text-button detection-preview-open" type="button" disabled={!imageSize || detecting} onClick={() => setPreviewOpen(true)}>{t('Detection preview')}</button>
             </div>
-            <label className="detection-field">
-              <span>{t('Detection sensitivity')} <strong>{detectionSensitivity}/12</strong></span>
-              <input type="range" min="1" max="12" value={detectionSensitivity} disabled={!calibration || detecting} onChange={(event) => setDetectionSensitivity(Number(event.target.value))} />
+            <label className="expert-mode-toggle">
+              <input type="checkbox" checked={expertMode} onChange={(event) => setExpertMode(event.target.checked)} />
+              {t('Expert mode')}
             </label>
-            <div className="sensitivity-endpoints"><span>{t('Strong contrast only')}</span><span>{t('Include weak contrast')}</span></div>
+            {expertMode && <>
+              <label className="detection-field">
+                <span>{t('Detection sensitivity')} <strong>{detectionSensitivity}/12</strong></span>
+                <input type="range" min="1" max="12" value={detectionSensitivity} disabled={!calibration || detecting} onChange={(event) => setDetectionSensitivity(Number(event.target.value))} />
+              </label>
+              <div className="sensitivity-endpoints"><span>{t('Strong contrast only')}</span><span>{t('Include weak contrast')}</span></div>
+            </>}
             <label className="detection-unit-field">
               <span>{t('Size unit')}</span>
               <select value={detectionUnit} disabled={!calibration || detecting} onChange={(event) => changeDetectionUnit(event.target.value as Unit)}>
@@ -1460,7 +1483,7 @@ function App() {
               {sporeReference.features && <svg className="reference-histogram" viewBox="0 0 255 40" preserveAspectRatio="none" role="img" aria-label={t('Reference grayscale histogram')}>
                 <polyline points={sporeReference.features.histogram.map((value, bin, all) => `${bin},${40 - value / Math.max(...all) * 38}`).join(' ')} />
               </svg>}
-              <fieldset className="matching-controls">
+              {expertMode && <fieldset className="matching-controls">
                 <legend>{t('Outline matching')}</legend>
                 <label className="detection-field">
                   <span>{t('Smoothing')}<output>{matchingSettings.smoothing}%</output></span>
@@ -1483,7 +1506,7 @@ function App() {
                   <button className="icon-button" type="button" title={t('Reset matching settings')} aria-label={t('Reset matching settings')} onClick={() => { setMatchingSettings({ ...DEFAULT_MATCHING_SETTINGS }); setShowRejectedOutlines(false) }}><RotateCcw size={16} aria-hidden="true" /></button>
                 </div>
                 {matchingBusy && <div className="matching-progress" role="status">{t('Updating outlines...')}</div>}
-              </fieldset>
+              </fieldset>}
               {sporeReference.matches && <ul className="spore-match-summary">
                 <li><i className="is-direct" aria-hidden="true" />{t('Direct matches')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'direct' && !match.recovery).length} / {sporeReference.matches.directCandidates}</strong></li>
                 <li><i className="is-watershed" aria-hidden="true" />{t('Split from clusters')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'watershed' && !match.recovery).length} · {t('{count} clusters', { count: sporeReference.matches.clusterCandidates })}</strong></li>
@@ -1598,6 +1621,7 @@ function App() {
           key={imageUrl}
           image={imageRef.current}
           initialPoint={lastDetectionPointRef.current}
+          expertMode={expertMode}
           sensitivity={detectionSensitivity}
           noiseFilter={noiseFilter}
           onNoiseFilterChange={setNoiseFilter}
@@ -1641,6 +1665,7 @@ function App() {
 type DetectionPreviewDialogProps = {
   image: HTMLImageElement
   initialPoint: Point | null
+  expertMode: boolean
   sensitivity: number
   noiseFilter: NoiseFilter
   onNoiseFilterChange: (value: NoiseFilter) => void
@@ -1652,7 +1677,7 @@ type DetectionPreviewDialogProps = {
   onClose: () => void
 }
 
-function DetectionPreviewDialog({ image, initialPoint, sensitivity, noiseFilter, onNoiseFilterChange, recoverNearby, onRecoverNearbyChange, onSensitivityChange, onPointChange, translate: t, onClose }: DetectionPreviewDialogProps) {
+function DetectionPreviewDialog({ image, initialPoint, expertMode, sensitivity, noiseFilter, onNoiseFilterChange, recoverNearby, onRecoverNearbyChange, onSensitivityChange, onPointChange, translate: t, onClose }: DetectionPreviewDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const overviewRef = useRef<HTMLImageElement>(null)
   const overviewViewportRef = useRef<HTMLDivElement>(null)
@@ -1881,13 +1906,13 @@ function DetectionPreviewDialog({ image, initialPoint, sensitivity, noiseFilter,
           </div>
         </div>
       </div>
-      <footer className="detection-preview-controls">
-        <label className="detection-field">
-          <span>{t('Detection sensitivity')} <strong>{sensitivity}/12</strong></span>
-          <input type="range" min="1" max="12" value={sensitivity} onChange={(event) => onSensitivityChange(Number(event.target.value))} />
-        </label>
-        <div className="sensitivity-endpoints"><span>{t('Strong contrast only')}</span><span>{t('Include weak contrast')}</span></div>
-      </footer>
+      {expertMode && <footer className="detection-preview-controls">
+          <label className="detection-field">
+            <span>{t('Detection sensitivity')} <strong>{sensitivity}/12</strong></span>
+            <input type="range" min="1" max="12" value={sensitivity} onChange={(event) => onSensitivityChange(Number(event.target.value))} />
+          </label>
+          <div className="sensitivity-endpoints"><span>{t('Strong contrast only')}</span><span>{t('Include weak contrast')}</span></div>
+        </footer>}
     </dialog>
   )
 }

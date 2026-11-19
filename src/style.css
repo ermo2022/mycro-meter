@@ -216,6 +216,8 @@ kbd { min-width: 15px; padding: 1px 3px; color: #59695b; border: 1px solid #b2c2
 .scale-note { margin: 9px 0 0; color: #56645c; font-size: 12px; line-height: 1.5; }
 .detection-settings { padding: 16px 21px; border-bottom: 1px solid var(--line); }
 .detection-preview-open { min-height: 44px; flex-shrink: 0; }
+.expert-mode-toggle { display: flex; align-items: center; gap: 7px; min-height: 36px; margin-top: 8px; color: #526057; font-size: 12px; cursor: pointer; }
+.expert-mode-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--forest); }
 .sensitivity-endpoints { display: flex; justify-content: space-between; gap: 12px; color: #647169; font-size: 10px; line-height: 1.4; }
 .sensitivity-endpoints > span { flex: 1; }
 .sensitivity-endpoints > span:last-child { text-align: right; }
