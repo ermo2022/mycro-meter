@@ -4,6 +4,7 @@ import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Trash2, X } fr
 import { adjustImageCrop, resampleMicroscopeImage, type CropHandle, type ImageCrop } from './imageResampler'
 import { createImageRecord, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listProjects, saveImageRecord, saveSet, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 import { ImageProcessingPanel, ProjectLibrary } from './WorkspaceDialogs'
+import { DetectionReviewDialog, type DetectionReviewItem } from './DetectionReviewDialog'
 import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
 import { extractReferenceFeatures, type ReferenceFeatures } from './referenceFeatures'
 import { boxIntersectionOverUnion, DEFAULT_MATCHING_SETTINGS, findMatchingSpores, type MatchingSettings, type SporeMatchResult } from './sporeMatching'
@@ -307,16 +308,22 @@ function App() {
   }, [calibrationDraft, calibrationLocked, calibrationEntering])
   const [calibrationUnit, setCalibrationUnit] = useState<Unit>('µm')
   const [measurements, setMeasurements] = useState<Measurement[]>([])
+  const measurementsRef = useRef(measurements)
+  measurementsRef.current = measurements
   const [imageId, setImageId] = useState('')
   const [measurementSet, setMeasurementSet] = useState<MeasurementSetImage[]>([])
   const [setUnit, setSetUnit] = useState<Unit>('µm')
   const [boxEditor, setBoxEditor] = useState<BoxEditorState | null>(null)
+  const [detectionReview, setDetectionReview] = useState<DetectionReviewItem[] | null>(null)
+  const [detectionReviewError, setDetectionReviewError] = useState<string | null>(null)
+  const [editingReviewId, setEditingReviewId] = useState<string | null>(null)
   const [detectionUnit, setDetectionUnit] = useState<Unit>('µm')
   const [minimumWidth, setMinimumWidth] = useState('3')
   const [minimumHeight, setMinimumHeight] = useState('3')
   const [maximumWidth, setMaximumWidth] = useState('50')
   const [maximumHeight, setMaximumHeight] = useState('50')
   const [detectionSensitivity, setDetectionSensitivity] = useState(8)
+  const [closingStrength, setClosingStrength] = useState(1)
   const [expertMode, setExpertMode] = useState(false)
   const [noiseFilter, setNoiseFilter] = useState<NoiseFilter>('gaussian')
   const [recoverNearby, setRecoverNearby] = useState(true)
@@ -786,7 +793,7 @@ function App() {
     setDetecting(true)
     setStatus('Finding the clicked object…')
     try {
-      const object = await detectClickedObject(image, point, 'auto', minimumObjectArea, detectionSensitivity, maximumObjectArea, noiseFilter, recoverNearby)
+      const object = await detectClickedObject(image, point, 'auto', minimumObjectArea, detectionSensitivity, maximumObjectArea, noiseFilter, recoverNearby, closingStrength)
       if (!isCurrent()) return
       if (!object) {
         setStatus('No object found at that point · try another point or drag a manual box')
@@ -807,7 +814,7 @@ function App() {
   }
 
   const startAutoDetect = () => {
-    if (!calibration || detecting) return
+    if (!calibration || detecting || matchingBusy) return
     setSelectingReference(true)
     setTool('measure')
     setCalibrationDraft(null)
@@ -1019,27 +1026,47 @@ function App() {
     }
   }
 
-  const recordDetectedSpores = async () => {
+  const openDetectionReview = () => {
     if (!calibration || matchingBusy || recordingDetections || !exportableDetections.length) return
+    setDetectionReview(exportableDetections.map((detection) => ({ ...detection })))
+    setDetectionReviewError(null)
+  }
+
+  const acceptReviewedDetections = async () => {
+    if (!calibration || matchingBusy || recordingDetections || !detectionReview?.length) return
     const image = imageRef.current
     const token = referenceTokenRef.current
+    if (!image) return
     setRecordingDetections(true)
+    setDetectionReviewError(null)
     try {
       const cv = await loadOpenCv()
       if (imageRef.current !== image || referenceTokenRef.current !== token) return
-      setMeasurements((current) => {
-        const additions: typeof exportableDetections = []
-        const boxes = current.flatMap((measurement) => measurement.kind === 'box' ? [measurement.rect] : [])
-        for (const detection of exportableDetections) {
-          if ([...boxes, ...additions].some((box) => boxIntersectionOverUnion(cv, detection, box) >= 0.5)) continue
-          additions.push(detection)
-        }
-        if (!additions.length || current.length + additions.length > MAX_IMAGE_RECORD_MEASUREMENTS) return current
-        return [...current, ...detectionsToMeasurements(additions, current)]
-      })
-      setStatus('Detected spores recorded · overlapping measurements skipped')
+      const currentMeasurements = measurementsRef.current
+      const boxes = currentMeasurements.flatMap((measurement) => measurement.kind === 'box' ? [measurement.rect] : [])
+      const additions: DetectionReviewItem[] = []
+      for (const detection of detectionReview) {
+        if ([...boxes, ...additions].some((box) => boxIntersectionOverUnion(cv, detection, box) >= 0.5)) continue
+        additions.push(detection)
+      }
+      if (currentMeasurements.length + additions.length > MAX_IMAGE_RECORD_MEASUREMENTS) {
+        setStatus('Measurement limit reached · remove candidates and try again')
+        setDetectionReviewError('Measurement limit reached · remove candidates and try again')
+        return
+      }
+      if (additions.length) {
+        setMeasurements([...currentMeasurements, ...detectionsToMeasurements(additions, currentMeasurements)])
+        setStatus('Detected spores recorded · overlapping measurements skipped')
+      } else {
+        setStatus('No new measurements added · all detections overlap existing boxes')
+      }
+      setDetectionReviewError(null)
+      referenceTokenRef.current += 1
+      setSporeReference(null)
+      setDetectionReview(null)
     } catch {
       setStatus('Could not record detected spores')
+      setDetectionReviewError('Could not record detected spores')
     } finally {
       setRecordingDetections(false)
     }
@@ -1182,6 +1209,14 @@ function App() {
   const acceptBoxEdit = () => {
     if (!calibration || !boxEditor) return
     const rect = longAxisFirst(boxEditor.rect)
+    if (editingReviewId) {
+      setDetectionReview((current) => current?.map((detection) =>
+        detection.id === editingReviewId ? { ...detection, ...rect } : detection) ?? null)
+      setDetectionReviewError(null)
+      setBoxEditor(null)
+      setEditingReviewId(null)
+      return
+    }
     if (selectingReference) {
       referenceTokenRef.current += 1
       setSporeReference({ rect, features: null, matches: null })
@@ -1424,7 +1459,7 @@ function App() {
               <span>{scaleText}</span>
               <span className="scale-state">{t(calibration ? 'SET' : 'UNSET')}</span>
             </div>
-            <p className="scale-note">{t(calibration ? 'Scale applies to all measurements in this image.' : 'Set a scale to convert pixels into real units.')}</p>
+            {!calibration && <p className="scale-note">{t('Set a scale to convert pixels into real units.')}</p>}
           </section>}
 
           {calibration && <section className="detection-settings" aria-labelledby="detection-settings-title">
@@ -1432,43 +1467,10 @@ function App() {
               <span id="detection-settings-title">{t('Detection settings')}</span>
               <button ref={previewButtonRef} className="text-button detection-preview-open" type="button" disabled={!imageSize || detecting} onClick={() => setPreviewOpen(true)}>{t('Detection preview')}</button>
             </div>
-            <label className="expert-mode-toggle">
-              <input type="checkbox" checked={expertMode} onChange={(event) => setExpertMode(event.target.checked)} />
-              {t('Expert mode')}
-            </label>
-            {expertMode && <>
-              <label className="detection-field">
-                <span>{t('Detection sensitivity')} <strong>{detectionSensitivity}/12</strong></span>
-                <input type="range" min="1" max="12" value={detectionSensitivity} disabled={!calibration || detecting} onChange={(event) => setDetectionSensitivity(Number(event.target.value))} />
-              </label>
-              <div className="sensitivity-endpoints"><span>{t('Strong contrast only')}</span><span>{t('Include weak contrast')}</span></div>
-            </>}
-            <label className="detection-unit-field">
-              <span>{t('Size unit')}</span>
-              <select value={detectionUnit} disabled={!calibration || detecting} onChange={(event) => changeDetectionUnit(event.target.value as Unit)}>
-                {units.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
-              </select>
-            </label>
-            <div className="detection-area-limits">
-              <label className="detection-field">
-                <span>{t('Minimum dimensions')}</span>
-                <div className="detection-dimensions">
-                  <input aria-label={t('Minimum width')} type="number" min="1" step="1" value={minimumWidth} disabled={!calibration || detecting} required onChange={(event) => setMinimumWidth(event.target.value)} onBlur={() => { if (minimumWidth.trim() !== '' && Number.isFinite(Number(minimumWidth))) setMinimumWidth(formatDetectionDimension(Number(minimumWidth))) }} />
-                  <span aria-hidden="true">×</span>
-                  <input aria-label={t('Minimum height')} type="number" min="1" step="1" value={minimumHeight} disabled={!calibration || detecting} required onChange={(event) => setMinimumHeight(event.target.value)} onBlur={() => { if (minimumHeight.trim() !== '' && Number.isFinite(Number(minimumHeight))) setMinimumHeight(formatDetectionDimension(Number(minimumHeight))) }} />
-                </div>
-              </label>
-              <label className="detection-field">
-                <span>{t('Maximum dimensions')}</span>
-                <div className="detection-dimensions">
-                  <input aria-label={t('Maximum width')} type="number" min="1" step="1" value={maximumWidth} disabled={!calibration || detecting} required onChange={(event) => setMaximumWidth(event.target.value)} onBlur={() => { if (maximumWidth.trim() !== '' && Number.isFinite(Number(maximumWidth))) setMaximumWidth(formatDetectionDimension(Number(maximumWidth))) }} />
-                  <span aria-hidden="true">×</span>
-                  <input aria-label={t('Maximum height')} type="number" min="1" step="1" value={maximumHeight} disabled={!calibration || detecting} required onChange={(event) => setMaximumHeight(event.target.value)} onBlur={() => { if (maximumHeight.trim() !== '' && Number.isFinite(Number(maximumHeight))) setMaximumHeight(formatDetectionDimension(Number(maximumHeight))) }} />
-                </div>
-              </label>
-            </div>
-            {calibration && !detectionLimitsValid && <p className="detection-settings-error" role="alert">{t('Dimensions must be positive; maximum area must be at least minimum.')}</p>}
-            <button className="button auto-detect-button" type="button" disabled={!imageSize || detecting || selectingReference} onClick={startAutoDetect}>{t('Auto-detect')}</button>
+            <button className="button button-primary auto-detect-button" type="button" disabled={!imageSize || detecting || selectingReference || matchingBusy} onClick={startAutoDetect}>
+              {(detecting || matchingBusy) && <span className="activity-spinner" aria-hidden="true" />}
+              {t(detecting || matchingBusy ? 'Detecting…' : 'Auto-detect')}
+            </button>
             {selectingReference && <div className="auto-detect-step" role="status">
               <span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span>
               <button className="text-button" type="button" onClick={cancelAutoDetect}>{t('Cancel')}</button>
@@ -1477,9 +1479,11 @@ function App() {
               <i aria-hidden="true" />
               <span>{t('Reference spore')}</span>
               <strong>{formatLength(sporeReference.rect.width / calibration.pixelsPerUnit)} × {formatLength(sporeReference.rect.height / calibration.pixelsPerUnit)} {calibration.unit} · Q {(sporeReference.rect.width / sporeReference.rect.height).toFixed(2)}</strong>
-              <small>{sporeReference.features
-                ? t('Area {area} {unit}²', { area: formatLength(sporeReference.features.area / calibration.pixelsPerUnit ** 2), unit: calibration.unit })
-                : t('Analysing…')}</small>
+              {sporeReference.features && <small>{t('Area {area} {unit}²', { area: formatLength(sporeReference.features.area / calibration.pixelsPerUnit ** 2), unit: calibration.unit })}</small>}
+              {matchingBusy && <div className="matching-progress" role="status">
+                <span className="activity-spinner" aria-hidden="true" />
+                <span>{t(sporeReference.features ? 'Searching the image for matching spores…' : 'Analysing…')}</span>
+              </div>}
               {sporeReference.features && <svg className="reference-histogram" viewBox="0 0 255 40" preserveAspectRatio="none" role="img" aria-label={t('Reference grayscale histogram')}>
                 <polyline points={sporeReference.features.histogram.map((value, bin, all) => `${bin},${40 - value / Math.max(...all) * 38}`).join(' ')} />
               </svg>}
@@ -1505,7 +1509,6 @@ function App() {
                   <label><input type="checkbox" checked={showRejectedOutlines} onChange={(event) => setShowRejectedOutlines(event.target.checked)} />{t('Show rejected outlines')}</label>
                   <button className="icon-button" type="button" title={t('Reset matching settings')} aria-label={t('Reset matching settings')} onClick={() => { setMatchingSettings({ ...DEFAULT_MATCHING_SETTINGS }); setShowRejectedOutlines(false) }}><RotateCcw size={16} aria-hidden="true" /></button>
                 </div>
-                {matchingBusy && <div className="matching-progress" role="status">{t('Updating outlines...')}</div>}
               </fieldset>}
               {sporeReference.matches && <ul className="spore-match-summary">
                 <li><i className="is-direct" aria-hidden="true" />{t('Direct matches')}<strong>{sporeReference.matches.matches.filter((match) => match.source === 'direct' && !match.recovery).length} / {sporeReference.matches.directCandidates}</strong></li>
@@ -1515,39 +1518,77 @@ function App() {
               <div className="detection-export-controls">
                 <label><input type="checkbox" checked={includeTentativeMeasurements} onChange={(event) => setIncludeTentativeMeasurements(event.target.checked)} />{t('Include tentative recoveries')}</label>
                 <div className="detection-export-actions">
-                  <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length || measurements.length >= MAX_IMAGE_RECORD_MEASUREMENTS} onClick={() => void recordDetectedSpores()}><Plus size={16} aria-hidden="true" />{t('Record detections')}</button>
+                  <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length || measurements.length >= MAX_IMAGE_RECORD_MEASUREMENTS} onClick={openDetectionReview}><Plus size={16} aria-hidden="true" />{t('Review detections')}</button>
                   <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length} onClick={exportDetectedSpores}><Download size={16} aria-hidden="true" />{t('Export detections CSV')}</button>
                 </div>
               </div>
               <button className="text-button" type="button" onClick={() => { referenceTokenRef.current += 1; setSporeReference(null); setStatus('Reference spore cleared') }}>{t('Clear reference')}</button>
+            </div>}
+            <label className="expert-mode-toggle">
+              <input type="checkbox" checked={expertMode} onChange={(event) => setExpertMode(event.target.checked)} />
+              {t('Expert mode')}
+            </label>
+            {expertMode && <div className="expert-settings">
+              <label className="detection-field">
+                <span>{t('Detection sensitivity')} <strong>{detectionSensitivity}/12</strong></span>
+                <input type="range" min="1" max="12" value={detectionSensitivity} disabled={!calibration || detecting} onChange={(event) => setDetectionSensitivity(Number(event.target.value))} />
+              </label>
+              <div className="sensitivity-endpoints"><span>{t('Strong contrast only')}</span><span>{t('Include weak contrast')}</span></div>
+              <label className="detection-unit-field">
+                <span>{t('Size unit')}</span>
+                <select value={detectionUnit} disabled={!calibration || detecting} onChange={(event) => changeDetectionUnit(event.target.value as Unit)}>
+                  {units.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                </select>
+              </label>
+              <div className="detection-area-limits">
+                <label className="detection-field">
+                  <span>{t('Minimum dimensions')}</span>
+                  <div className="detection-dimensions">
+                    <input aria-label={t('Minimum width')} type="number" min="1" step="1" value={minimumWidth} disabled={!calibration || detecting} required onChange={(event) => setMinimumWidth(event.target.value)} onBlur={() => { if (minimumWidth.trim() !== '' && Number.isFinite(Number(minimumWidth))) setMinimumWidth(formatDetectionDimension(Number(minimumWidth))) }} />
+                    <span aria-hidden="true">×</span>
+                    <input aria-label={t('Minimum height')} type="number" min="1" step="1" value={minimumHeight} disabled={!calibration || detecting} required onChange={(event) => setMinimumHeight(event.target.value)} onBlur={() => { if (minimumHeight.trim() !== '' && Number.isFinite(Number(minimumHeight))) setMinimumHeight(formatDetectionDimension(Number(minimumHeight))) }} />
+                  </div>
+                </label>
+                <label className="detection-field">
+                  <span>{t('Maximum dimensions')}</span>
+                  <div className="detection-dimensions">
+                    <input aria-label={t('Maximum width')} type="number" min="1" step="1" value={maximumWidth} disabled={!calibration || detecting} required onChange={(event) => setMaximumWidth(event.target.value)} onBlur={() => { if (maximumWidth.trim() !== '' && Number.isFinite(Number(maximumWidth))) setMaximumWidth(formatDetectionDimension(Number(maximumWidth))) }} />
+                    <span aria-hidden="true">×</span>
+                    <input aria-label={t('Maximum height')} type="number" min="1" step="1" value={maximumHeight} disabled={!calibration || detecting} required onChange={(event) => setMaximumHeight(event.target.value)} onBlur={() => { if (maximumHeight.trim() !== '' && Number.isFinite(Number(maximumHeight))) setMaximumHeight(formatDetectionDimension(Number(maximumHeight))) }} />
+                  </div>
+                </label>
+              </div>
+              {calibration && !detectionLimitsValid && <p className="detection-settings-error" role="alert">{t('Dimensions must be positive; maximum area must be at least minimum.')}</p>}
             </div>}
           </section>}
 
           {(calibration || measurements.length > 0) && <section className="results-section">
             <div className="section-title"><span>{t('Measurements')}</span>{calibration && measurements.length > 0 && <button className="text-button" type="button" onClick={exportRawCsv} title={t('Length and width values only')}>{t('Export CSV')}</button>}</div>
             {measurements.length ? (
-              <ol className="measurement-list">
-                {[...measurements].reverse().map((measurement) => {
-                  const box = measurement.kind === 'box' ? longAxisFirst(measurement.rect) : null
-                  const q = box ? box.width / box.height : null
-                  return (
-                    <li className="measurement-row" key={measurement.id}>
-                      <button className="measurement-open" type="button" disabled={!calibration} onClick={() => openMeasurementEditor(measurement)} aria-label={t('Edit {name}', { name: measurement.name })}>
-                        <span className="measurement-index">{measurement.name}</span>
-                        <span className="measurement-detail">
-                          <strong>{measurement.kind === 'distance'
-                            ? calibration ? formatLength(measurement.pixels / calibration.pixelsPerUnit) : measurement.pixels.toFixed(1)
-                            : calibration ? `${formatLength(box!.width / calibration.pixelsPerUnit)} × ${formatLength(box!.height / calibration.pixelsPerUnit)}` : `${box!.width.toFixed(0)} × ${box!.height.toFixed(0)}`}</strong>
-                          <small>{measurement.kind === 'distance'
-                            ? `${calibration?.unit ?? 'px'} · ${measurement.pixels.toFixed(1)} px`
-                            : `L × W ${calibration?.unit ?? 'px'} · ${box!.width.toFixed(0)} × ${box!.height.toFixed(0)} px · Q ${q?.toFixed(2)}`}</small>
-                        </span>
-                      </button>
-                      <button className="remove-button" type="button" disabled={!calibration} title={t('Remove {name}', { name: measurement.name })} aria-label={t('Remove {name}', { name: measurement.name })} onClick={() => setMeasurements((items) => items.filter((item) => item.id !== measurement.id))}>×</button>
-                    </li>
-                  )
-                })}
-              </ol>
+              <div className="measurement-list-scroll" role="region" aria-label={t('Measurement list')} tabIndex={0}>
+                <ol className="measurement-list">
+                  {[...measurements].reverse().map((measurement) => {
+                    const box = measurement.kind === 'box' ? longAxisFirst(measurement.rect) : null
+                    const q = box ? box.width / box.height : null
+                    return (
+                      <li className="measurement-row" key={measurement.id}>
+                        <button className="measurement-open" type="button" disabled={!calibration} onClick={() => openMeasurementEditor(measurement)} aria-label={t('Edit {name}', { name: measurement.name })}>
+                          <span className="measurement-index">{measurement.name}</span>
+                          <span className="measurement-detail">
+                            <strong>{measurement.kind === 'distance'
+                              ? calibration ? formatLength(measurement.pixels / calibration.pixelsPerUnit) : measurement.pixels.toFixed(1)
+                              : calibration ? `${formatLength(box!.width / calibration.pixelsPerUnit)} × ${formatLength(box!.height / calibration.pixelsPerUnit)}` : `${box!.width.toFixed(0)} × ${box!.height.toFixed(0)}`}</strong>
+                            <small>{measurement.kind === 'distance'
+                              ? `${calibration?.unit ?? 'px'} · ${measurement.pixels.toFixed(1)} px`
+                              : `L × W ${calibration?.unit ?? 'px'} · ${box!.width.toFixed(0)} × ${box!.height.toFixed(0)} px · Q ${q?.toFixed(2)}`}</small>
+                          </span>
+                        </button>
+                        <button className="remove-button" type="button" disabled={!calibration} title={t('Remove {name}', { name: measurement.name })} aria-label={t('Remove {name}', { name: measurement.name })} onClick={() => setMeasurements((items) => items.filter((item) => item.id !== measurement.id))}>×</button>
+                      </li>
+                    )
+                  })}
+                </ol>
+              </div>
             ) : (
               <div className="no-results"><span className="no-results-mark" aria-hidden="true">＋</span><span>{t('No measurements yet')}</span></div>
             )}
@@ -1623,17 +1664,51 @@ function App() {
           initialPoint={lastDetectionPointRef.current}
           expertMode={expertMode}
           sensitivity={detectionSensitivity}
+          closingStrength={closingStrength}
+          minimumArea={minimumObjectArea}
+          maximumArea={maximumObjectArea}
           noiseFilter={noiseFilter}
           onNoiseFilterChange={setNoiseFilter}
           recoverNearby={recoverNearby}
           onRecoverNearbyChange={setRecoverNearby}
           onSensitivityChange={setDetectionSensitivity}
+          onClosingStrengthChange={setClosingStrength}
           onPointChange={(point) => { lastDetectionPointRef.current = point }}
           translate={t}
           onClose={() => {
             setPreviewOpen(false)
             requestAnimationFrame(() => previewButtonRef.current?.focus())
           }}
+        />
+      )}
+      {detectionReview && imageRef.current && imageSize && (
+        <DetectionReviewDialog
+          image={imageRef.current}
+          imageSize={imageSize}
+          detections={detectionReview}
+          busy={recordingDetections}
+          editing={editingReviewId !== null}
+          error={detectionReviewError ? translateStatus(detectionReviewError, locale) : undefined}
+          translate={t}
+          formatDimensions={(box) => {
+            const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
+            return `${formatLength(box.width / pixelsPerUnit)} × ${formatLength(box.height / pixelsPerUnit)} ${calibration?.unit ?? 'px'}`
+          }}
+          onRemove={(id) => {
+            setDetectionReviewError(null)
+            setDetectionReview((current) => current?.filter((detection) => detection.id !== id) ?? null)
+          }}
+          onEdit={(detection) => {
+            setEditingReviewId(detection.id)
+            setSelectingReference(false)
+            setBoxEditor({ objectId: `review-${detection.id}`, measurementId: null, rect: detection })
+          }}
+          onCancel={() => {
+            setDetectionReview(null)
+            setDetectionReviewError(null)
+            setEditingReviewId(null)
+          }}
+          onAccept={() => void acceptReviewedDetections()}
         />
       )}
       {boxEditor && imageRef.current && imageSize && (
@@ -1654,6 +1729,10 @@ function App() {
           } : undefined}
           onClose={() => {
             setBoxEditor(null)
+            if (editingReviewId) {
+              setEditingReviewId(null)
+              return
+            }
             setStatus(selectingReference ? 'Click a representative spore to use as the reference' : boxEditor.measurementId === null ? 'Box discarded' : 'Box changes discarded')
           }}
         />
@@ -1667,17 +1746,21 @@ type DetectionPreviewDialogProps = {
   initialPoint: Point | null
   expertMode: boolean
   sensitivity: number
+  closingStrength: number
+  minimumArea: number
+  maximumArea: number
   noiseFilter: NoiseFilter
   onNoiseFilterChange: (value: NoiseFilter) => void
   recoverNearby: boolean
   onRecoverNearbyChange: (value: boolean) => void
   onSensitivityChange: (value: number) => void
+  onClosingStrengthChange: (value: number) => void
   onPointChange: (point: Point) => void
   translate: (text: string) => string
   onClose: () => void
 }
 
-function DetectionPreviewDialog({ image, initialPoint, expertMode, sensitivity, noiseFilter, onNoiseFilterChange, recoverNearby, onRecoverNearbyChange, onSensitivityChange, onPointChange, translate: t, onClose }: DetectionPreviewDialogProps) {
+function DetectionPreviewDialog({ image, initialPoint, expertMode, sensitivity, closingStrength, minimumArea, maximumArea, noiseFilter, onNoiseFilterChange, recoverNearby, onRecoverNearbyChange, onSensitivityChange, onClosingStrengthChange, onPointChange, translate: t, onClose }: DetectionPreviewDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const overviewRef = useRef<HTMLImageElement>(null)
   const overviewViewportRef = useRef<HTMLDivElement>(null)
@@ -1758,7 +1841,7 @@ function DetectionPreviewDialog({ image, initialPoint, expertMode, sensitivity, 
     setLoading(true)
     setFailed(false)
     const timeout = window.setTimeout(() => {
-      void createDetectionPreview(image, point, sensitivity, noiseFilter).then((result) => {
+      void createDetectionPreview(image, point, sensitivity, noiseFilter, closingStrength, minimumArea, maximumArea).then((result) => {
         if (!cancelled) {
           setPreview(result)
           setLoading(false)
@@ -1774,7 +1857,7 @@ function DetectionPreviewDialog({ image, initialPoint, expertMode, sensitivity, 
       cancelled = true
       window.clearTimeout(timeout)
     }
-  }, [image, point, sensitivity, noiseFilter, retry])
+  }, [image, point, sensitivity, closingStrength, minimumArea, maximumArea, noiseFilter, retry])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -1899,6 +1982,11 @@ function DetectionPreviewDialog({ image, initialPoint, expertMode, sensitivity, 
         <div className="detection-preview-modes" role="group" aria-label={t('Preview mode')}>
           {modes.map((value) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => setMode(value)}>{t(modeLabels[value])}</button>)}
         </div>
+        <div className="detection-preview-guide-key">
+          <span><i className="detection-preview-guide-dark" />{t('Dark object contours')}</span>
+          <span><i className="detection-preview-guide-bright" />{t('Light object contours')}</span>
+          <small>{t('Outlines meet the size limits.')}</small>
+        </div>
         <div className="detection-preview-image" aria-busy={loading}>
           <canvas ref={canvasRef} aria-label={t(modeLabels[mode])} style={{ visibility: loading || failed ? 'hidden' : 'visible' }} />
           <div className="detection-preview-status" role="status">
@@ -1906,13 +1994,21 @@ function DetectionPreviewDialog({ image, initialPoint, expertMode, sensitivity, 
           </div>
         </div>
       </div>
-      {expertMode && <footer className="detection-preview-controls">
+      <footer className="detection-preview-controls">
+        <label className="detection-field">
+          <span>{t('Gap closing')} <strong>{closingStrength * 2 + 1}×{closingStrength * 2 + 1}</strong></span>
+          <input type="range" min="1" max="3" step="1" value={closingStrength} onChange={(event) => onClosingStrengthChange(Number(event.target.value))} />
+        </label>
+        <div className="sensitivity-endpoints"><span>{t('Smaller gaps')}</span><span>{t('Larger gaps')}</span></div>
+        <p className="detection-preview-gap-note">{t('Stronger closing can join nearby objects.')}</p>
+        {expertMode && <>
           <label className="detection-field">
             <span>{t('Detection sensitivity')} <strong>{sensitivity}/12</strong></span>
             <input type="range" min="1" max="12" value={sensitivity} onChange={(event) => onSensitivityChange(Number(event.target.value))} />
           </label>
           <div className="sensitivity-endpoints"><span>{t('Strong contrast only')}</span><span>{t('Include weak contrast')}</span></div>
-        </footer>}
+        </>}
+      </footer>
     </dialog>
   )
 }

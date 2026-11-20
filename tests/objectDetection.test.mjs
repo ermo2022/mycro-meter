@@ -158,7 +158,7 @@ test('detection enforces a 50 px² floor across units and rejects an unusable ma
 
 const geometry = compile(readFileSync(new URL('../src/boxGeometry.ts', import.meta.url), 'utf8'))
 const source = readFileSync(new URL('../src/objectDetection.ts', import.meta.url), 'utf8')
-const { contourBox } = compile(`${source}\nexport { contourBox }`, (name) => {
+const { contourBox, createClosingKernel } = compile(`${source}\nexport { contourBox, createClosingKernel }`, (name) => {
   if (name === './boxGeometry') return geometry
   if (name.endsWith('?url')) return ''
   throw new Error(`Unexpected dependency: ${name}`)
@@ -189,6 +189,36 @@ function assertEncloses(box, contour) {
     assert.ok(Math.abs(-offsetX * Math.sin(radians) + offsetY * Math.cos(radians)) <= box.height / 2 + 1e-8)
   }
 }
+
+test('stronger closing kernels bridge wider gaps in the binary mask', () => {
+  const pixels = Array(21 * 21).fill(0)
+  for (let y = 6; y <= 14; y += 1) {
+    for (let x = 3; x <= 17; x += 1) {
+      const outline = y === 6 || y === 14 || x === 3 || x === 17
+      const gap = y === 6 && x >= 10 && x < 15
+      if (outline && !gap) pixels[y * 21 + x] = 255
+    }
+  }
+  const binary = cv.matFromArray(21, 21, cv.CV_8UC1, pixels)
+  const closedMasks = []
+  try {
+    for (const strength of [1, 3]) {
+      const kernel = createClosingKernel(cv, strength)
+      const closed = new cv.Mat()
+      try {
+        cv.morphologyEx(binary, closed, cv.MORPH_CLOSE, kernel)
+        closedMasks.push(closed)
+      } finally {
+        kernel.delete()
+      }
+    }
+    assert.equal(closedMasks[0].ucharPtr(6, 12)[0], 0)
+    assert.equal(closedMasks[1].ucharPtr(6, 12)[0], 255)
+  } finally {
+    binary.delete()
+    for (const mask of closedMasks) mask.delete()
+  }
+})
 
 test('elongated silhouettes retain axes, dimensions, and enclosure across rotations', () => {
   for (const degrees of [-89, -65, -30, 0, 17, 45, 80, 90, 135]) {

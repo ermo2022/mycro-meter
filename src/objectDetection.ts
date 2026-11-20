@@ -7,6 +7,7 @@ export type DetectionRegion = { x: number; y: number; width: number; height: num
 export type DetectedObject = OrientedBox & { id: string; area: number; nearby?: boolean }
 export type DetectionPreview = { original: HTMLCanvasElement; dark: HTMLCanvasElement; bright: HTMLCanvasElement }
 type DetectionCandidate = DetectedObject & { clickDistance: number }
+type DetectionRegionResult = { boxes: DetectionCandidate[]; clippedTarget: boolean; clippedNearby: boolean; previewGuides: number[][] }
 
 type OpenCvApi = typeof import('@techstark/opencv-js')
 type OpenCvModule = OpenCvApi & {
@@ -54,8 +55,9 @@ export async function detectObjects(
   sensitivity: number,
   region?: DetectionRegion | null,
   noiseFilter: NoiseFilter = 'gaussian',
+  closingStrength = 1,
 ): Promise<DetectedObject[]> {
-  const result = await detectRegion(image, polarity, minimumArea, sensitivity, region, undefined, Infinity, undefined, noiseFilter)
+  const result = await detectRegion(image, polarity, minimumArea, sensitivity, region, undefined, Infinity, undefined, noiseFilter, 4, closingStrength)
   return result.boxes.map((box) => selectedObject(box))
 }
 
@@ -68,6 +70,7 @@ export async function detectClickedObject(
   maximumArea = Infinity,
   noiseFilter: NoiseFilter = 'gaussian',
   recoverNearby = true,
+  closingStrength = 1,
 ): Promise<DetectedObject | null> {
   const maximumRadius = Math.max(image.naturalWidth, image.naturalHeight)
   for (let radius = Math.min(128, maximumRadius); ; radius = Math.min(radius * 2, maximumRadius)) {
@@ -76,7 +79,7 @@ export async function detectClickedObject(
     const candidates: DetectionCandidate[] = []
     const nearbyCandidates: DetectionCandidate[] = []
     for (const candidatePolarity of polarities) {
-      const result = await detectRegion(image, candidatePolarity, polarity === 'auto' ? 1 : minimumArea, sensitivity, region, point, polarity === 'auto' ? Infinity : maximumArea, undefined, noiseFilter, recoverNearby ? 16 : 4)
+      const result = await detectRegion(image, candidatePolarity, polarity === 'auto' ? 1 : minimumArea, sensitivity, region, point, polarity === 'auto' ? Infinity : maximumArea, undefined, noiseFilter, recoverNearby ? 16 : 4, closingStrength)
       if (!result.clippedTarget) {
         const direct = result.boxes.find((box) => box.clickDistance >= -4)
         if (direct) candidates.push(direct)
@@ -122,6 +125,9 @@ export async function createDetectionPreview(
   point: { x: number; y: number },
   sensitivity: number,
   noiseFilter: NoiseFilter = 'gaussian',
+  closingStrength = 1,
+  minimumArea = 1,
+  maximumArea = Infinity,
 ): Promise<DetectionPreview> {
   const region = clickedRegion(image, point, Math.min(128, Math.max(image.naturalWidth, image.naturalHeight)))
   const original = document.createElement('canvas')
@@ -132,8 +138,10 @@ export async function createDetectionPreview(
   context.drawImage(image, region.x, region.y, region.width, region.height, 0, 0, region.width, region.height)
   const dark = document.createElement('canvas')
   const bright = document.createElement('canvas')
-  await detectRegion(image, 'dark', 1, sensitivity, region, point, Infinity, dark, noiseFilter)
-  await detectRegion(image, 'bright', 1, sensitivity, region, point, Infinity, bright, noiseFilter)
+  const darkResult = await detectRegion(image, 'dark', minimumArea, sensitivity, region, point, maximumArea, dark, noiseFilter, 4, closingStrength)
+  const brightResult = await detectRegion(image, 'bright', minimumArea, sensitivity, region, point, maximumArea, bright, noiseFilter, 4, closingStrength)
+  drawGuides(context, darkResult.previewGuides, '#ef4ca8')
+  drawGuides(context, brightResult.previewGuides, '#00a8c7')
   return { original, dark, bright }
 }
 
@@ -148,7 +156,8 @@ async function detectRegion(
   previewCanvas?: HTMLCanvasElement,
   noiseFilter: NoiseFilter = 'gaussian',
   targetTolerance = 4,
-): Promise<{ boxes: DetectionCandidate[]; clippedTarget: boolean; clippedNearby: boolean }> {
+  closingStrength = 1,
+): Promise<DetectionRegionResult> {
   const cv = await loadOpenCv()
   const originalWidth = image.naturalWidth
   const originalHeight = image.naturalHeight
@@ -182,7 +191,7 @@ async function detectRegion(
   const boxes: (Omit<DetectedObject, 'id'> & { clickDistance: number })[] = []
   let clippedTarget = false
   let clippedNearby = false
-  const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3))
+  const kernel = createClosingKernel(cv, closingStrength)
 
   try {
     cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY)
@@ -194,14 +203,27 @@ async function detectRegion(
     const adaptiveOffset = polarity === 'dark' ? 12 - sensitivity : target ? sensitivity - 12 : sensitivity - 1
     cv.adaptiveThreshold(blurred, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, thresholdMode, blockSize, adaptiveOffset)
     cv.morphologyEx(binary, closed, cv.MORPH_CLOSE, kernel)
-    if (previewCanvas) {
-      cv.imshow(previewCanvas, closed)
-      return { boxes: [], clippedTarget: false, clippedNearby: false }
-    }
-    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-
     const minimumProcessingArea = Math.max(1, minimumArea * resizeFactor * resizeFactor)
     const maximumProcessingArea = maximumArea * resizeFactor * resizeFactor
+    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    if (previewCanvas) {
+      cv.imshow(previewCanvas, closed)
+      const context = previewCanvas.getContext('2d')
+      if (!context) throw new Error('Canvas is unavailable')
+      const previewGuides = drawContourGuides(
+        cv,
+        context,
+        contours,
+        minimumProcessingArea,
+        maximumProcessingArea,
+        analysisRegion,
+        originalWidth,
+        originalHeight,
+        polarity === 'dark' ? '#ef4ca8' : '#00a8c7',
+      )
+      return { boxes: [], clippedTarget: false, clippedNearby: false, previewGuides }
+    }
+
     for (let index = 0; index < contours.size(); index += 1) {
       const contour = contours.get(index)
       const clickDistance = target ? cv.pointPolygonTest(contour, new cv.Point(
@@ -258,6 +280,79 @@ async function detectRegion(
     boxes: boxes.slice(0, 500).map((box, index) => ({ ...box, id: `object-${index + 1}` })),
     clippedTarget,
     clippedNearby,
+    previewGuides: [],
+  }
+}
+
+function createClosingKernel(cv: OpenCvApi, closingStrength: number) {
+  const level = Math.round(Math.max(1, Math.min(3, closingStrength)))
+  const size = level * 2 + 1
+  const shape = level === 1 ? cv.MORPH_ELLIPSE : cv.MORPH_RECT
+  return cv.getStructuringElement(shape, new cv.Size(size, size))
+}
+
+function drawContourGuides(
+  cv: OpenCvApi,
+  context: CanvasRenderingContext2D,
+  contours: InstanceType<OpenCvApi['MatVector']>,
+  minimumArea: number,
+  maximumArea: number,
+  region: DetectionRegion,
+  imageWidth: number,
+  imageHeight: number,
+  guideColor: string,
+): number[][] {
+  const guides: number[][] = []
+  for (let index = 0; index < contours.size(); index += 1) {
+    const contour = contours.get(index)
+    try {
+      const area = cv.contourArea(contour)
+      const bounds = cv.boundingRect(contour)
+      const touchesCrop = (bounds.x <= 0 && region.x > 0) ||
+        (bounds.y <= 0 && region.y > 0) ||
+        (bounds.x + bounds.width >= context.canvas.width && region.x + region.width < imageWidth) ||
+        (bounds.y + bounds.height >= context.canvas.height && region.y + region.height < imageHeight)
+      if (area < minimumArea || area > maximumArea || bounds.width < 3 || bounds.height < 3 || touchesCrop) continue
+      const points = Array.from(contour.data32S)
+      if (points.length < 6) continue
+      guides.push(points)
+      context.beginPath()
+      context.moveTo(points[0], points[1])
+      for (let point = 2; point < points.length; point += 2) {
+        context.lineTo(points[point], points[point + 1])
+      }
+      context.closePath()
+      context.lineJoin = 'round'
+      context.lineCap = 'round'
+      context.lineWidth = 3
+      context.strokeStyle = '#17221a'
+      context.stroke()
+      context.lineWidth = 1.5
+      context.strokeStyle = guideColor
+      context.stroke()
+    } finally {
+      contour.delete()
+    }
+  }
+  return guides
+}
+
+function drawGuides(context: CanvasRenderingContext2D, guides: number[][], color: string) {
+  context.lineJoin = 'round'
+  context.lineCap = 'round'
+  for (const points of guides) {
+    context.beginPath()
+    context.moveTo(points[0], points[1])
+    for (let point = 2; point < points.length; point += 2) {
+      context.lineTo(points[point], points[point + 1])
+    }
+    context.closePath()
+    context.lineWidth = 3
+    context.strokeStyle = '#17221a'
+    context.stroke()
+    context.lineWidth = 1.5
+    context.strokeStyle = color
+    context.stroke()
   }
 }
 
