@@ -389,8 +389,9 @@ kbd { min-width: 15px; padding: 1px 3px; color: #59695b; border: 1px solid #b2c2
 .detection-review-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); align-content: start; gap: 8px; padding: 1px 3px 1px 1px; overflow: auto; overscroll-behavior: contain; }
 .detection-review-card { min-width: 0; display: flex; flex-direction: column; gap: 7px; padding: 7px; border: 1px solid #d8ded4; border-radius: 4px; background: #fff; }
 .detection-review-card.is-selected { border-color: #879d44; box-shadow: 0 0 0 1px #879d44; }
-.detection-review-card-select { min-width: 0; display: grid; grid-template-rows: auto auto; gap: 7px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.detection-review-card-select:focus-visible { outline: 2px solid #22826c; outline-offset: 2px; }
+.detection-review-image-edit { width: 100%; min-width: 0; display: block; padding: 0; border: 0; border-radius: 3px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.detection-review-image-edit:focus-visible { outline: 2px solid #22826c; outline-offset: 2px; }
+.detection-review-image-edit:hover .detection-review-thumbnail-wrap { border-color: #879d44; }
 .detection-review-thumbnail-wrap { position: relative; min-width: 0; display: block; overflow: hidden; border: 1px solid #313d38; border-radius: 3px; background: #17221e; }
 .detection-review-thumbnail { width: 100%; height: auto; aspect-ratio: 8 / 5; display: block; background: #17221e; }
 .detection-review-number { position: absolute; top: 6px; left: 6px; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid #ffffff70; border-radius: 50%; background: #17221edb; color: #f4f4ec; font-family: var(--mono); font-size: 10px; }
