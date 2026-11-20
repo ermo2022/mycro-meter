@@ -23,6 +23,20 @@ function collectDetectionDeclarations(node) {
   ts.forEachChild(node, collectDetectionDeclarations)
 }
 collectDetectionDeclarations(appSource)
+let exportableDetectionsExpression
+function findExportableDetections(node) {
+  if (ts.isVariableDeclaration(node) && node.name.getText(appSource) === 'exportableDetections') {
+    exportableDetectionsExpression = node.initializer.getText(appSource)
+  }
+  ts.forEachChild(node, findExportableDetections)
+}
+findExportableDetections(appSource)
+assert.ok(exportableDetectionsExpression)
+const getExportableDetections = new Function(
+  'sporeReference',
+  'includeTentativeMeasurements',
+  `return ${exportableDetectionsExpression}`,
+)
 const detectionHelpers = ['formatDetectionDimension', 'detectionAreaDefaults'].map(name => {
   const helper = appSource.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name)
   assert.ok(helper)
@@ -51,6 +65,24 @@ const detectionSettings = compile([
   '  return result;',
   '}',
 ].join('\n'))
+
+test('auto-detected measurements include the golden reference and only opt in to tentative matches', () => {
+  const reference = { centerX: 10, centerY: 20, width: 8, height: 4, angle: 0 }
+  const direct = { ...reference, centerX: 30, id: 'match-1', source: 'direct' }
+  const tentative = { ...reference, centerX: 50, id: 'match-2', source: 'direct', recovery: 'rim' }
+  const sporeReference = { rect: reference, matches: { matches: [direct, tentative] } }
+
+  assert.deepEqual(getExportableDetections(sporeReference, false), [
+    { ...reference, id: 'reference-spore' },
+    direct,
+  ])
+  assert.deepEqual(getExportableDetections(sporeReference, true), [
+    { ...reference, id: 'reference-spore' },
+    direct,
+    tentative,
+  ])
+  assert.deepEqual(getExportableDetections({ rect: reference, matches: null }, true), [])
+})
 
 test('dimension warning appears only for calibrated invalid limits', () => {
   let condition
