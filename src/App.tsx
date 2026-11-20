@@ -348,7 +348,12 @@ function App() {
     values,
   )
   const referenceRect = sporeReference?.rect
-  const exportableDetections = sporeReference?.matches?.matches.filter((match) => includeTentativeMeasurements || !match.recovery) ?? []
+  const exportableDetections: DetectionReviewItem[] = sporeReference?.matches
+    ? [
+        { ...sporeReference.rect, id: 'reference-spore' },
+        ...sporeReference.matches.matches.filter((match) => includeTentativeMeasurements || !match.recovery),
+      ]
+    : []
   useEffect(() => {
     const image = imageRef.current
     if (!referenceRect || !image) {
