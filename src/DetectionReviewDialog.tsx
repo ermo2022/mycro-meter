@@ -44,7 +44,7 @@ export function DetectionReviewDialog({
   const editingRef = useRef(editing)
   const busyRef = useRef(busy)
   const editFocusRef = useRef<HTMLElement | null>(null)
-  const candidateSelectRefs = useRef(new Map<string, HTMLButtonElement>())
+  const candidateEditRefs = useRef(new Map<string, HTMLButtonElement>())
   const [selectedId, setSelectedId] = useState(detections[0]?.id ?? '')
 
   onCancelRef.current = onCancel
@@ -109,6 +109,7 @@ export function DetectionReviewDialog({
   }
 
   const handleEdit = (event: MouseEvent<HTMLButtonElement>, detection: DetectionReviewItem) => {
+    setSelectedId(detection.id)
     editFocusRef.current = event.currentTarget
     onEdit(detection)
   }
@@ -118,7 +119,7 @@ export function DetectionReviewDialog({
     if (next) setSelectedId(next.id)
     onRemove(id)
     window.requestAnimationFrame(() => {
-      if (next) candidateSelectRefs.current.get(next.id)?.focus()
+      if (next) candidateEditRefs.current.get(next.id)?.focus()
       else closeButtonRef.current?.focus()
     })
   }
@@ -134,7 +135,7 @@ export function DetectionReviewDialog({
         <header className="detection-review-header">
           <div>
             <h2 id="detection-review-title">{t('Review detected spores')}</h2>
-            <p>{t('Review each spore crop. Delete false detections or resize/rotate their boxes before accepting.')}</p>
+            <p>{t('Click a spore image to resize or rotate its box. Delete false detections before accepting.')}</p>
           </div>
           <button ref={closeButtonRef} className="box-editor-close" type="button" aria-label={t('Cancel review')} disabled={busy} onClick={onCancel}>×</button>
         </header>
@@ -149,15 +150,15 @@ export function DetectionReviewDialog({
                     className={`detection-review-card ${detection.id === selectedId ? 'is-selected' : ''}`}
                   >
                     <button
-                      className="detection-review-card-select"
+                      className="detection-review-image-edit"
                       type="button"
                       ref={(element) => {
-                        if (element) candidateSelectRefs.current.set(detection.id, element)
-                        else candidateSelectRefs.current.delete(detection.id)
+                        if (element) candidateEditRefs.current.set(detection.id, element)
+                        else candidateEditRefs.current.delete(detection.id)
                       }}
                       disabled={busy}
-                      aria-pressed={detection.id === selectedId}
-                      onClick={() => setSelectedId(detection.id)}
+                      aria-label={t('Edit box for {name}', { name: labelFor(detection, index) })}
+                      onClick={(event) => handleEdit(event, detection)}
                     >
                       <span className="detection-review-thumbnail-wrap">
                         <DetectionCropThumbnail
@@ -173,13 +174,12 @@ export function DetectionReviewDialog({
                             : index + 1 - (detections.some((item) => item.id === 'reference-spore') ? 1 : 0)}
                         </span>
                       </span>
-                      <span className="detection-review-card-detail">
-                        <strong>{labelFor(detection, index)}</strong>
-                        <small>{formatDimensions(detection)}</small>
-                      </span>
                     </button>
+                    <div className="detection-review-card-detail">
+                      <strong>{labelFor(detection, index)}</strong>
+                      <small>{formatDimensions(detection)}</small>
+                    </div>
                     <div className="detection-review-card-actions">
-                      <button className="text-button" type="button" disabled={busy} onClick={(event) => handleEdit(event, detection)}>{t('Edit box')}</button>
                       <button
                         className="detection-review-remove"
                         type="button"
