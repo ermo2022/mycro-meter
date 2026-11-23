@@ -25,6 +25,34 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .workspace-dialog::backdrop { background: #08100d99; }
 .workspace-dialog-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--paper); }
 .workspace-dialog-header h2 { margin: 0; font-size: 18px; }
+.camera-dialog-content { display: grid; gap: 12px; padding: 16px; }
+.camera-preview-button { position: relative; display: block; width: 100%; padding: 0; overflow: hidden; border: 0; background: #102522; cursor: pointer; }
+.camera-preview-button:disabled { opacity: 1; }
+.camera-preview-button:focus-visible { outline-offset: -3px; }
+.camera-preview { display: block; width: 100%; max-height: 55dvh; object-fit: contain; }
+.camera-dialog-content .detection-field { margin: 0; }
+.camera-dialog-content select { width: 100%; min-height: 40px; }
+.camera-selector-icon { display: none; }
+.camera-dialog-content p { margin: 0; }
+.camera-dialog-content [role="alert"] { color: var(--red); }
+.camera-hint { color: #526057; font-size: 12px; }
+.camera-dialog-content > .button { justify-self: start; }
+@media (max-width: 860px), (pointer: coarse) {
+  .camera-dialog { width: 100vw; max-width: none; height: 100dvh; max-height: none; margin: 0; overflow: hidden; border: 0; border-radius: 0; }
+  .camera-dialog .workspace-dialog-header { position: absolute; inset: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) auto auto; padding: 0; border: 0; background: transparent; }
+  .camera-dialog .workspace-dialog-header h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .camera-dialog .workspace-dialog-header .tool-button { width: 44px; height: 44px; flex: 0 0 44px; color: white; border-radius: 50%; background: #102522bb; }
+  .camera-dialog-content { position: absolute; inset: 0; display: block; padding: 0; }
+  .camera-preview-button { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .camera-preview { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; }
+  .camera-dialog-content .camera-hint, .camera-dialog-content > .button { display: none; }
+  .camera-dialog-content .camera-selector { position: absolute; top: max(8px, env(safe-area-inset-top)); left: max(8px, env(safe-area-inset-left)); display: grid; place-items: center; width: 44px; height: 44px; color: white; border-radius: 50%; background: #102522bb; }
+  .camera-selector > span { display: none; }
+  .camera-selector-icon { display: block; }
+  .camera-dialog-content .camera-selector select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+  .camera-selector:focus-within { outline: 2px solid #d7f06a; outline-offset: 2px; }
+  .camera-dialog-content [role="alert"] { position: absolute; right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); left: max(12px, env(safe-area-inset-left)); padding: 12px; color: white; border-radius: 4px; background: #702d24ed; }
+}
 .summary-settings { display: grid; gap: 12px; padding: 16px; }
 .summary-settings .detection-field { margin: 0; }
 .summary-settings select { min-width: 0; width: 100%; min-height: 40px; padding: 6px 8px; border: 1px solid #cbd3c9; border-radius: 3px; background: #fff; }
@@ -199,10 +227,11 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .measurement-canvas.cursor-measure, .measurement-canvas.cursor-calibrate { cursor: crosshair; }
 .measurement-canvas.cursor-pan { cursor: grab; }
 .measurement-canvas.cursor-pan:active { cursor: grabbing; }
-.empty-state { display: flex; flex-direction: column; align-items: center; gap: 11px; margin: 18px; padding: 18px; border: 0; background: transparent; cursor: pointer; text-align: center; animation: appear .35s ease both; }
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 11px; margin: 18px; padding: 18px; text-align: center; animation: appear .35s ease both; }
 .empty-state strong { color: #243832; font-size: 17px; font-weight: 600; }
 .empty-state > span:not(.empty-target):not(.button) { color: #77827c; font-size: 12px; }
-.empty-state .button { margin-top: 8px; }
+.empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
+.empty-actions .button { min-height: 44px; }
 .empty-target { width: 68px; height: 68px; position: relative; display: grid; place-items: center; margin-bottom: 5px; border: 1px solid #c9d0c3; border-radius: 50%; background: #eff0e8; }
 .empty-target::before, .empty-target::after { content: ''; position: absolute; background: #b4c078; }
 .empty-target::before { width: 1px; height: 78px; }
