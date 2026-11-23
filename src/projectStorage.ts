@@ -17,8 +17,16 @@ export type StoredMeasurementSet = {
   images: StoredImageRecord[]
 }
 
+export type CalibrationPreset = {
+  id: string
+  name: string
+  calibration: { pixelsPerUnit: number; unit: Unit }
+  updatedAt: number
+}
+
 const imageRecords = localforage.createInstance({ name: 'mycrometer', storeName: 'image_records_store', driver: localforage.INDEXEDDB })
 const sets = localforage.createInstance({ name: 'mycrometer', storeName: 'sets_store', driver: localforage.INDEXEDDB })
+const calibrationPresets = localforage.createInstance({ name: 'mycrometer', storeName: 'calibration_presets_store', driver: localforage.INDEXEDDB })
 const MAX_PROJECT_BYTES = 128 * 1024 * 1024
 const MAX_PNG_BYTES = 128 * 1024 * 1024
 let writes: Promise<unknown> = Promise.resolve()
@@ -89,6 +97,40 @@ export function deleteProjects(projects: { id: string; kind: 'image-record' | 's
       await (project.kind === 'image-record' ? imageRecords : sets).removeItem(project.id)
     }
   })
+}
+
+function normalizeCalibrationPreset(value: unknown): CalibrationPreset {
+  if (!value || typeof value !== 'object') throw new Error('Invalid calibration preset')
+  const preset = value as CalibrationPreset
+  if (typeof preset.id !== 'string' || preset.id.length === 0 || preset.id.length > 256 ||
+    typeof preset.name !== 'string' || preset.name.trim().length === 0 || preset.name.length > 100 ||
+    !Number.isFinite(preset.updatedAt) || preset.updatedAt <= 0 ||
+    !preset.calibration || !Number.isFinite(preset.calibration.pixelsPerUnit) || preset.calibration.pixelsPerUnit <= 0 ||
+    !units.includes(preset.calibration.unit)) throw new Error('Invalid calibration preset')
+  return { ...preset, name: preset.name.trim() }
+}
+
+export async function listCalibrationPresets(): Promise<CalibrationPreset[]> {
+  await writes
+  const presets: CalibrationPreset[] = []
+  await calibrationPresets.iterate<unknown, void>((value) => { presets.push(normalizeCalibrationPreset(value)) })
+  return presets.sort((first, second) => second.updatedAt - first.updatedAt)
+}
+
+export function saveCalibrationPreset(preset: CalibrationPreset) {
+  return enqueue(async () => {
+    const valid = normalizeCalibrationPreset(preset)
+    const existing: CalibrationPreset[] = []
+    await calibrationPresets.iterate<unknown, void>((value) => { existing.push(normalizeCalibrationPreset(value)) })
+    const duplicate = existing.find((entry) => entry.id !== valid.id && entry.name.toLocaleLowerCase() === valid.name.toLocaleLowerCase())
+    if (duplicate) throw new Error('Calibration preset name already exists')
+    await calibrationPresets.setItem(valid.id, valid)
+    return valid
+  })
+}
+
+export function deleteCalibrationPreset(id: string) {
+  return enqueue(() => calibrationPresets.removeItem(id))
 }
 
 export function validateMetadata(value: unknown): asserts value is ImageMeasurementData {

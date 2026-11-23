@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Download, FolderOpen, Trash2, X } from 'lucide-react'
-import { imageProcessingSize, type ImageCrop } from './imageResampler'
+import { cropContainsBounds, imageProcessingSize, type ImageCrop } from './imageResampler'
 import { formatStorageBytes, projectStorageBytes, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 
 type Translate = (key: string, values?: Record<string, string | number>) => string
@@ -107,9 +107,10 @@ export function ProjectLibrary({ imageRecords, sets, activeImageRecordId, active
   </Dialog>
 }
 
-export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onReductionChange, onApply, onClose, t }: {
+export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onReductionChange, measurementBounds, preserveScale, hasReference, onApply, onClose, t }: {
   image: HTMLImageElement; crop: ImageCrop; onCropChange: (crop: ImageCrop) => void
   reduction: number; onReductionChange: (reduction: number) => void
+  measurementBounds: ImageCrop | null; preserveScale: boolean; hasReference: boolean
   onApply: (crop: ImageCrop, reduction: number) => Promise<void>; onClose: () => void; t: Translate
 }) {
   const [busy, setBusy] = useState(false)
@@ -134,18 +135,23 @@ export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onR
 
   let output: { width: number; height: number } | null = null
   try { output = imageProcessingSize(image.naturalWidth, image.naturalHeight, crop, reduction) } catch {}
-  return <section className="image-processing-panel" aria-label={t('Crop and resample')}>
+  const containsMeasurements = cropContainsBounds(crop, measurementBounds)
+  return <section className="image-processing-panel" aria-label={t(preserveScale ? 'Crop image' : 'Crop and resample')}>
     <form ref={formRef} className="image-processing-form" onSubmit={(event) => {
       event.preventDefault()
-      if (!output || busy) return
+      if (!output || !containsMeasurements || busy) return
       setBusy(true)
       void onApply(crop, reduction).catch((failure) => { setError(String(failure)); setBusy(false) })
     }}>
       <div className="crop-fields">{(['x', 'y', 'width', 'height'] as const).map((key) => <label key={key}>{t(key === 'x' ? 'Crop X' : key === 'y' ? 'Crop Y' : key === 'width' ? 'Crop width' : 'Crop height')}<input type="number" min={key === 'x' || key === 'y' ? 0 : 1} step="1" required disabled={busy} value={crop[key]} onChange={(event) => onCropChange({ ...crop, [key]: Number(event.target.value) })} /></label>)}</div>
-      <label className="detection-field"><span>{t('Reduction factor')} <strong>{reduction.toFixed(1)}x</strong></span><input aria-label={t('Reduction factor')} type="range" min="1" max="1.5" step="0.1" value={reduction} disabled={busy} onChange={(event) => onReductionChange(Number(event.target.value))} /></label>
+      {preserveScale ? <p>{t('Cropping keeps the original pixel scale and measurements.')}</p> : <label className="detection-field"><span>{t('Reduction factor')} <strong>{reduction.toFixed(1)}x</strong></span><input aria-label={t('Reduction factor')} type="range" min="1" max="1.5" step="0.1" value={reduction} disabled={busy} onChange={(event) => onReductionChange(Number(event.target.value))} /></label>}
+      <p>{t('Cropping creates a new image; saved originals and set snapshots are unchanged.')}</p>
+      {measurementBounds && containsMeasurements && <p>{t('The crop must include all existing measurements.')}</p>}
+      {hasReference && <p>{t('Cropping clears the detection reference and candidates.')}</p>}
       <output>{output ? `${output.width} x ${output.height} px / PNG` : t('Invalid crop')}</output>
+      {!containsMeasurements && <p role="alert">{t('The crop must include all existing measurements.')}</p>}
       {error && <p role="alert">{error}</p>}
-      <div className="project-form-actions"><button className="button button-small" type="button" disabled={busy} onClick={() => { onCropChange({ x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight }); onReductionChange(1) }}>{t('Reset')}</button><button className="button button-small" type="button" disabled={busy} onClick={onClose}>{t('Cancel crop')}</button><button className="button button-primary" type="submit" disabled={!output || busy}>{t(busy ? 'Processing' : 'Apply crop')}</button></div>
+      <div className="project-form-actions"><button className="button button-small" type="button" disabled={busy} onClick={() => { onCropChange({ x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight }); onReductionChange(1) }}>{t('Reset')}</button><button className="button button-small" type="button" disabled={busy} onClick={onClose}>{t('Cancel crop')}</button><button className="button button-primary" type="submit" disabled={!output || !containsMeasurements || busy}>{t(busy ? 'Processing' : 'Apply crop')}</button></div>
     </form>
   </section>
 }

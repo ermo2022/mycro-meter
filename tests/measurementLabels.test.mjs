@@ -72,6 +72,78 @@ test('analysis sections appear only when their prerequisite data is available', 
   }
 })
 
+test('calibration presets keep save visible and use selected or new preset IDs', () => {
+  const appText = source.getFullText()
+  assert.ok(appText.includes('className="calibration-preset-name-row"'))
+  assert.ok(appText.includes('persistCalibrationPreset(selectedCalibrationPresetId || crypto.randomUUID(), calibrationPresetName)'))
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
+  assert.ok(css.includes('.calibration-preset-name-row {'))
+  assert.ok(!css.includes('grid-template-columns: minmax(180px, 2fr)'))
+})
+
+test('scale controls remain open when uncalibrated and collapse after calibration or preset selection', () => {
+  const functions = new Map()
+  let hidden
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && ['saveCalibration', 'applyCalibrationPreset'].includes(node.name.text)) {
+      functions.set(node.name.text, node.initializer.getText(source))
+    }
+    if (ts.isJsxAttribute(node) && node.name.getText(source) === 'hidden' && node.parent.properties.some(attribute =>
+      ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'id' && attribute.initializer?.text === 'image-scale-settings')) {
+      hidden = node.initializer.expression.getText(source)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert.ok(hidden)
+  const isHidden = new Function('calibration', 'scaleExpanded', `return ${hidden}`)
+  assert.equal(isHidden(null, false), false)
+  assert.equal(isHidden({}, false), true)
+  assert.equal(isHidden({}, true), false)
+
+  const noop = () => {}
+  let collapsed = 0
+  let applied
+  const dependencies = {
+    calibrationDraft: { start: { x: 0, y: 0 }, end: { x: 100, y: 0 } },
+    knownLength: '10', calibrationUnit: 'µm', imageSize: { x: 100 },
+    savedCalibrationPresets: [{ id: 'camera', name: 'Camera', calibration: { pixelsPerUnit: 8, unit: 'mm' } }],
+    distance: (start, end) => Math.hypot(end.x - start.x, end.y - start.y),
+    setCalibration: value => { applied = value },
+    collapseScale: () => { collapsed++ },
+    setSelectedCalibrationPresetId: noop, setCalibrationPresetName: noop, applyDetectionAreaDefaults: noop,
+    setCalibrationDraft: noop, setCalibrationLocked: noop, setTool: noop, setStatus: noop,
+  }
+  const action = name => {
+    assert.ok(functions.has(name))
+    const { outputText } = ts.transpileModule(`const action = ${functions.get(name)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } })
+    return new Function(...Object.keys(dependencies), `${outputText}; return action`)(...Object.values(dependencies))
+  }
+  action('saveCalibration')({ preventDefault: noop })
+  assert.deepEqual(applied, { pixelsPerUnit: 10, unit: 'µm' })
+  assert.equal(collapsed, 1)
+  action('applyCalibrationPreset')('camera')
+  assert.deepEqual(applied, dependencies.savedCalibrationPresets[0].calibration)
+  assert.equal(collapsed, 2)
+  action('applyCalibrationPreset')('missing')
+  assert.equal(collapsed, 2)
+})
+
+test('auto-detect precedes the detection settings and preview in visual and keyboard order', () => {
+  let section
+  function visit(node) {
+    if (ts.isJsxElement(node) && node.openingElement.attributes.properties.some(attribute =>
+      ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'aria-labelledby' && attribute.initializer?.text === 'detection-settings-title')) section = node
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert.ok(section)
+  const children = section.children.filter(ts.isJsxElement)
+  assert.match(children[0].openingElement.getText(source), /auto-detect-button/)
+  assert.match(children[1].getText(source), /detection-settings-title/)
+  assert.match(children[1].getText(source), /detection-preview-open/)
+})
+
 test('box editor deletion removes only the saved measurement and is unavailable for drafts or references', () => {
   let deleteAttribute
   function visit(node) {
