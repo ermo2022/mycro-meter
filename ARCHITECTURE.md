@@ -11,13 +11,16 @@ Browser
   index.html
     src/main.tsx                 Starts React and registers the production service worker
       src/App.tsx                Owns the workspace, interactions, and current session state
-        src/objectDetection.ts   Finds image contours using lazily loaded OpenCV.js
-        src/boxGeometry.ts       Calculates and edits rotated measurement boxes
-        src/measurementCsv.ts    Defines measurement data and reads/writes CSV
-        src/imageResampler.ts    Validates crop/scale bounds and encodes lossless PNGs
-        src/projectStorage.ts    IndexedDB persistence and portable ZIP projects
-        src/WorkspaceDialogs.tsx Project library and image-processing dialogs
-        src/locales/*.json       UI messages and status translations per language
+        src/objectDetection.ts       Finds image contours using lazily loaded OpenCV.js
+        src/referenceFeatures.ts     Extracts reference patches and appearance features
+        src/sporeMatching.ts         Matches reference outlines across image pixels
+        src/boxGeometry.ts           Calculates and edits rotated measurement boxes
+        src/measurementCsv.ts        Defines measurement data and reads/writes CSV
+        src/imageResampler.ts        Validates crop/scale bounds and encodes lossless PNGs
+        src/projectStorage.ts        IndexedDB persistence and portable ZIP projects
+        src/WorkspaceDialogs.tsx     Project library and image-processing dialogs
+        src/DetectionReviewDialog.tsx Reviews and edits candidate detections
+        src/locales/*.json           UI messages and status translations per language
         src/style.css            Layout and visual styling
   public/sw.js                   Caches the application shell and same-origin assets
 ```
@@ -37,6 +40,9 @@ Browser
 | `src/imageResampler.ts` | Native-resolution PNG normalization and explicit pre-calibration crop/resampling, limited to 1.5x reduction with high-quality interpolation and uniform scaling. |
 | `src/projectStorage.ts` | IndexedDB-only localforage stores, serialized writes, session/set snapshots, bounded archive validation, and lazily loaded JSZip STORE exports/imports. |
 | `src/WorkspaceDialogs.tsx` | Native modal dialogs for browsing saved projects and previewing an image crop with draggable or numeric selection. |
+| `src/DetectionReviewDialog.tsx` | Tiled detection-review dialog for selecting, deleting, resizing, rotating, and accepting candidate boxes. |
+| `src/referenceFeatures.ts` | Extracts reference tight-patch and padded-context features, histograms, polarity, area, and outlines. |
+| `src/sporeMatching.ts` | Finds, filters, watershed-splits, and ranks full-image contours against reference features. |
 | `src/locales/*.json` | UI translations. Each locale file is named with its language code and contains a native `languageName`, `messages`, `statuses`, and `statusTemplates`. Vite discovers these files automatically. |
 | `src/style.css` | Application and responsive layout styling. |
 | `src/utif.d.ts` | TypeScript declaration that lets the project use the UTIF library. It describes the library to the compiler; it is not the TIFF decoder itself. |

@@ -102,7 +102,9 @@ npm run build
 npm run preview
 ```
 
-Run the geometry, export, image-processing, and IndexedDB/ZIP round-trip tests with `npm test`.
+Run the geometry, export, image-processing, IndexedDB/ZIP round-trip, locale, and offline tuning tests with `npm test`. The Node test suite uses TypeScript transpilation and lightweight browser/OpenCV fixtures; it does not replace visual testing in a browser.
+
+For a production verification, run `npm run build`, then `npm run preview` and test the app through the preview URL. The development server does not register the service worker. After the first successful preview visit, reload and test offline behavior in the browser.
 
 ### Offline Spore Tuning Diagnostics
 
