@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
 import * as UTIF from 'utif'
-import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react'
-import { adjustImageCrop, resampleMicroscopeImage, type CropHandle, type ImageCrop } from './imageResampler'
-import { createImageRecord, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listProjects, saveImageRecord, saveSet, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
-import { ImageProcessingPanel, ProjectLibrary } from './WorkspaceDialogs'
+import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Settings2, Trash2, X } from 'lucide-react'
+import { adjustImageCrop, constrainCropToBounds, cropContainsBounds, measurementCropBounds, resampleMicroscopeImage, translateCroppedMeasurements, type CropHandle, type ImageCrop } from './imageResampler'
+import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listCalibrationPresets, listProjects, MAX_PROJECT_BYTES, MAX_SET_ATTACHMENTS, projectBinaryBytes, saveCalibrationPreset, saveImageRecord, saveSet, validAttachmentName, type CalibrationPreset, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
+import { ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
+import { formatDeciles, formatMycologicalSummary, formatSummary, summarize, type SummaryMethod, type SummarySettings } from './mycologicalSummary'
 import { DetectionReviewDialog, type DetectionReviewItem } from './DetectionReviewDialog'
 import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
 import { extractReferenceFeatures, type ReferenceFeatures } from './referenceFeatures'
@@ -50,6 +51,10 @@ function translateStatus(status: string, locale: LocaleData) {
   })
   const scaleSet = status.match(/^Scale set · (.+) per (.+)$/)
   if (scaleSet) return render('scaleSet', { unit: scaleSet[1], length: scaleSet[2] })
+  const presetApplied = status.match(/^Calibration applied · (.*)$/)
+  if (presetApplied) return render('presetApplied', { name: presetApplied[1] })
+  const presetSaved = status.match(/^Calibration preset saved · (.*)$/)
+  if (presetSaved) return render('presetSaved', { name: presetSaved[1] })
   const savedSet = status.match(/^(.*) saved to measurement set$/)
   if (savedSet) return render('savedSet', { imageName: savedSet[1] })
   const acceptedBox = status.match(/^Box accepted · (.*)$/)
@@ -190,59 +195,6 @@ function boxFromRegion(region: DetectionRegion): BoxRectangle {
   })
 }
 
-type SummaryStats = { n: number; mean: number; sampleSd: number | null; min: number; max: number; median: number; p10: number; p90: number }
-
-function summarize(values: number[]): SummaryStats {
-  if (!values.length) return { n: 0, mean: 0, sampleSd: null, min: 0, max: 0, median: 0, p10: 0, p90: 0 }
-  const sorted = [...values].sort((a, b) => a - b)
-  const mean = values.reduce((total, value) => total + value, 0) / values.length
-  const sampleSd = values.length < 2
-    ? null
-    : Math.sqrt(values.reduce((total, value) => total + (value - mean) ** 2, 0) / (values.length - 1))
-  const percentile = (fraction: number) => {
-    const position = (sorted.length - 1) * fraction
-    const lower = Math.floor(position)
-    const upper = Math.ceil(position)
-    return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower)
-  }
-  return {
-    n: values.length,
-    mean,
-    sampleSd,
-    min: sorted[0],
-    max: sorted[sorted.length - 1],
-    median: percentile(0.5),
-    p10: percentile(0.1),
-    p90: percentile(0.9),
-  }
-}
-
-function formatSummary(stats: SummaryStats, unit: string) {
-  if (!stats.n) return '—'
-  if (stats.sampleSd === null) return `${formatMycologicalNumber(stats.mean)} (SD n/a)${unit ? ` ${unit}` : ''}`
-  return `${formatMycologicalNumber(stats.mean)} ± ${formatMycologicalNumber(stats.sampleSd)}${unit ? ` ${unit}` : ''}`
-}
-
-function formatDeciles(stats: SummaryStats, unit: string) {
-  if (!stats.n) return '—'
-  const range = formatMycologicalRange(stats)
-  return `${range}${unit ? ` ${unit}` : ''}`
-}
-
-function formatMycologicalNumber(value: number) {
-  return Number(value.toFixed(1)).toString()
-}
-
-function formatMycologicalMedian(value: number) {
-  return formatMycologicalNumber(value)
-}
-
-function formatMycologicalRange(stats: SummaryStats) {
-  const lower = stats.min < stats.p10 ? `(${formatMycologicalNumber(stats.min)}) ` : ''
-  const upper = stats.max > stats.p90 ? ` (${formatMycologicalNumber(stats.max)})` : ''
-  return `${lower}${formatMycologicalNumber(stats.p10)}–${formatMycologicalNumber(stats.p90)}${upper}`
-}
-
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const imageRef = useRef<HTMLImageElement | null>(null)
@@ -250,6 +202,7 @@ function App() {
   const importInputRef = useRef<HTMLInputElement>(null)
   const viewRef = useRef<HTMLDivElement>(null)
   const calibrationLengthInputRef = useRef<HTMLInputElement>(null)
+  const scaleToggleRef = useRef<HTMLButtonElement>(null)
   const measurementGestureRef = useRef<{ pointerId: number; start: Point; moved: boolean } | null>(null)
   const calibrationHandleRef = useRef<{ pointerId: number; key: 'start' | 'end' } | null>(null)
   const touchPointersRef = useRef(new Map<number, Point>())
@@ -263,7 +216,21 @@ function App() {
   const [imageBlob, setImageBlob] = useState<Blob | null>(null)
   const [savedImageRecords, setSavedImageRecords] = useState<StoredImageRecord[]>([])
   const [savedSets, setSavedSets] = useState<StoredMeasurementSet[]>([])
+  const [savedCalibrationPresets, setSavedCalibrationPresets] = useState<CalibrationPreset[]>([])
+  const [selectedCalibrationPresetId, setSelectedCalibrationPresetId] = useState('')
+  const [calibrationPresetName, setCalibrationPresetName] = useState('')
+  const [calibrationPresetBusy, setCalibrationPresetBusy] = useState(false)
+  const [calibrationPresetError, setCalibrationPresetError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
+  const [summarySettingsOpen, setSummarySettingsOpen] = useState(false)
+  const [summarySettings, setSummarySettings] = useState<SummarySettings>(() => {
+    const method = window.localStorage.getItem('mycrometer-summary-method')
+    return {
+      method: method === 'p05-p95' || method === 'sd1' || method === 'sd2' ? method : 'p10-p90',
+      extremes: window.localStorage.getItem('mycrometer-summary-extremes') !== 'false',
+      decimals: window.localStorage.getItem('mycrometer-summary-decimals') === '2' ? 2 : 1,
+    }
+  })
   const [processingOpen, setProcessingOpen] = useState(false)
   const [cropBusy, setCropBusy] = useState(false)
   const [crop, setCrop] = useState<ImageCrop>({ x: 0, y: 0, width: 1, height: 1 })
@@ -273,6 +240,12 @@ function App() {
   const [storageReady, setStorageReady] = useState(false)
   const [storageStatus, setStorageStatus] = useState('')
   const [setSnapshots, setSetSnapshots] = useState<StoredImageRecord[]>([])
+  const [setAttachments, setSetAttachments] = useState<SetAttachment[]>([])
+  const [attachmentError, setAttachmentError] = useState('')
+  const [attachmentQuotaWarning, setAttachmentQuotaWarning] = useState('')
+  const [setSaveError, setSetSaveError] = useState('')
+  const [storageEstimate, setStorageEstimate] = useState<StorageEstimate | null>(null)
+  const [storageEstimateUnavailable, setStorageEstimateUnavailable] = useState(false)
   const [setId, setSetId] = useState<string>(() => crypto.randomUUID())
   const [setName, setSetName] = useState('')
   const [language, setLanguage] = useState<Language>(() => {
@@ -286,6 +259,7 @@ function App() {
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 })
   const [calibration, setCalibration] = useState<Calibration | null>(null)
+  const [scaleExpanded, setScaleExpanded] = useState(false)
   const [pendingImport, setPendingImport] = useState<ImageMeasurementData | null>(null)
   const [calibrationDraft, setCalibrationDraft] = useState<CalibrationDraft | null>(null)
   const [calibrationLocked, setCalibrationLocked] = useState(false)
@@ -308,6 +282,7 @@ function App() {
   }, [calibrationDraft, calibrationLocked, calibrationEntering])
   const [calibrationUnit, setCalibrationUnit] = useState<Unit>('µm')
   const [measurements, setMeasurements] = useState<Measurement[]>([])
+  const measurementBounds = useMemo(() => measurementCropBounds(measurements), [measurements])
   const measurementsRef = useRef(measurements)
   measurementsRef.current = measurements
   const [imageId, setImageId] = useState('')
@@ -428,12 +403,20 @@ function App() {
   }, [language])
 
   useEffect(() => {
+    window.localStorage.setItem('mycrometer-summary-method', summarySettings.method)
+    window.localStorage.setItem('mycrometer-summary-extremes', String(summarySettings.extremes))
+    window.localStorage.setItem('mycrometer-summary-decimals', String(summarySettings.decimals))
+  }, [summarySettings])
+
+  useEffect(() => {
     const storage = navigator.storage
     if (storage?.persist) void storage.persist().catch(() => false)
     void listProjects().then((projects) => {
       setSavedImageRecords(projects.imageRecords)
       setSavedSets(projects.sets)
     }).catch(() => setStorageStatus('Local storage unavailable')).finally(() => setStorageReady(true))
+    void listCalibrationPresets().then(setSavedCalibrationPresets)
+      .catch(() => setCalibrationPresetError('Could not load calibration presets'))
   }, [])
 
   useEffect(() => {
@@ -448,11 +431,44 @@ function App() {
 
   useEffect(() => {
     if (!storageReady || !setSnapshots.length) return
-    const record: StoredMeasurementSet = { id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots }
+    let active = true
+    const record: StoredMeasurementSet = { id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots, attachments: setAttachments }
     void saveSet(record).then(() => {
       setSavedSets((current) => [record, ...current.filter((entry) => entry.id !== record.id)])
-    }).catch(() => setStorageStatus('Local save failed. Export a ZIP backup.'))
-  }, [storageReady, setSnapshots, setId, setName, setUnit])
+      if (active) {
+        setSetSaveError('')
+        if (navigator.storage?.estimate) void navigator.storage.estimate().then((estimate) => {
+          if (active) {
+            setStorageEstimate(estimate)
+            setStorageEstimateUnavailable(estimate.usage === undefined || estimate.quota === undefined)
+          }
+        }).catch(() => { if (active) setStorageEstimateUnavailable(true) })
+      }
+    }).catch(() => {
+      if (active) {
+        setSetSaveError('Could not save set locally. Export a ZIP backup.')
+        setStorageStatus('Local save failed. Export a ZIP backup.')
+      }
+    })
+    return () => { active = false }
+  }, [storageReady, setSnapshots, setId, setName, setUnit, setAttachments])
+
+  useEffect(() => {
+    if (!setSnapshots.length) return
+    let active = true
+    if (!navigator.storage?.estimate) {
+      setStorageEstimateUnavailable(true)
+      return
+    }
+    void navigator.storage.estimate().then((estimate) => {
+      if (!active) return
+      setStorageEstimate(estimate)
+      setStorageEstimateUnavailable(estimate.usage === undefined || estimate.quota === undefined)
+    }).catch(() => {
+      if (active) setStorageEstimateUnavailable(true)
+    })
+    return () => { active = false }
+  }, [setId, setSnapshots, setAttachments])
 
   useEffect(() => {
     return () => {
@@ -586,11 +602,12 @@ function App() {
     return () => observer.disconnect()
   }, [imageSize, zoom, pan, measurements, manualDraft, calibration, calibrationDraft, tool, sporeReference, showRejectedOutlines])
 
-  const applyImageRecord = (imageRecord: ImageMeasurementData) => {
+  const applyImageRecord = (imageRecord: ImageMeasurementData, preserveDetectionSettings = false) => {
     detectionEpochRef.current += 1
     measurementGestureRef.current = null
     setCalibration(imageRecord.calibration)
-    if (imageRecord.calibration) applyDetectionAreaDefaults(imageRecord.calibration, imageRecord.imageWidth)
+    setScaleExpanded(false)
+    if (imageRecord.calibration && !preserveDetectionSettings) applyDetectionAreaDefaults(imageRecord.calibration, imageRecord.imageWidth)
     setCalibrationDraft(null)
     setCalibrationLocked(false)
     setManualStart(null)
@@ -602,7 +619,7 @@ function App() {
     setStatus(`Restored ${imageRecord.measurements.length} measurements${imageRecord.calibration ? '' : ' · calibration required'}`)
   }
 
-  const loadImage = (url: string, fileName: string, imageRecord?: ImageMeasurementData | null, restoredId?: string, storedBlob?: Blob) => {
+  const loadImage = (url: string, fileName: string, imageRecord?: ImageMeasurementData | null, restoredId?: string, storedBlob?: Blob, preserveDetectionSettings = false) => {
     const epoch = ++imageLoadEpochRef.current
     const image = new Image()
     image.onload = async () => {
@@ -638,6 +655,9 @@ function App() {
       setMeasurements([])
       setBoxEditor(null)
       setCalibration(null)
+      setScaleExpanded(false)
+      setSelectedCalibrationPresetId('')
+      setCalibrationPresetName('')
       setCalibrationDraft(null)
       setCalibrationLocked(false)
       setTool('calibrate')
@@ -648,7 +668,7 @@ function App() {
       if (!imageRecord) {
         setStatus('Calibration required · click two points on a known scale bar')
       } else if (imageRecord.imageWidth === image.naturalWidth && imageRecord.imageHeight === image.naturalHeight) {
-        applyImageRecord(imageRecord)
+        applyImageRecord(imageRecord, preserveDetectionSettings)
       } else {
         setStatus(`Image is ${image.naturalWidth} × ${image.naturalHeight} px, image record expects ${imageRecord.imageWidth} × ${imageRecord.imageHeight} px · open ${imageRecord.imageName}`)
       }
@@ -749,6 +769,9 @@ function App() {
     setImageId('')
     setImageSize(null)
     setCalibration(null)
+    setScaleExpanded(false)
+    setSelectedCalibrationPresetId('')
+    setCalibrationPresetName('')
     setCalibrationDraft(null)
     setCalibrationLocked(false)
     setMeasurements([])
@@ -975,6 +998,67 @@ function App() {
     setStatus('Adjust box dimensions and accept to add the measurement')
   }
 
+  const collapseScale = () => {
+    setScaleExpanded(false)
+    requestAnimationFrame(() => scaleToggleRef.current?.focus({ preventScroll: true }))
+  }
+
+  const startCalibration = () => {
+    setTool('calibrate')
+    setCalibrationDraft(null)
+    setCalibrationLocked(false)
+    setStatus('Click two points on a known scale bar')
+  }
+
+  const applyCalibrationPreset = (presetId: string) => {
+    const preset = savedCalibrationPresets.find((entry) => entry.id === presetId)
+    if (!preset) return
+    setSelectedCalibrationPresetId(preset.id)
+    setCalibrationPresetName(preset.name)
+    setCalibration(preset.calibration)
+    collapseScale()
+    applyDetectionAreaDefaults(preset.calibration, imageSize?.x ?? 0)
+    setCalibrationDraft(null)
+    setCalibrationLocked(false)
+    setTool('measure')
+    setStatus(`Calibration applied · ${preset.name}`)
+  }
+
+  const persistCalibrationPreset = async (id: string, name: string, renameOnly = false) => {
+    const source = savedCalibrationPresets.find((entry) => entry.id === id)
+    const presetCalibration = renameOnly ? source?.calibration : calibration
+    if (!presetCalibration || calibrationPresetBusy) return
+    const trimmedName = name.trim()
+    if (!trimmedName) return
+    const duplicate = savedCalibrationPresets.find((entry) => entry.id !== id && entry.name.toLocaleLowerCase() === trimmedName.toLocaleLowerCase())
+    if (duplicate && !window.confirm(t('Replace calibration preset {name}?', { name: duplicate.name }))) return
+    const preset: CalibrationPreset = {
+      id: duplicate?.id ?? id,
+      name: trimmedName,
+      calibration: presetCalibration,
+      updatedAt: Date.now(),
+    }
+    setCalibrationPresetBusy(true)
+    setCalibrationPresetError('')
+    try {
+      const saved = await saveCalibrationPreset(preset)
+      if (source && duplicate) await deleteCalibrationPreset(id)
+      setSavedCalibrationPresets((current) => [saved, ...current.filter((entry) => entry.id !== saved.id && !(source && duplicate && entry.id === id))])
+      setSelectedCalibrationPresetId(saved.id)
+      setCalibrationPresetName(saved.name)
+      setStatus(`Calibration preset saved · ${saved.name}`)
+    } catch {
+      setCalibrationPresetError(renameOnly ? 'Could not rename calibration preset' : 'Could not save calibration preset')
+      try {
+        setSavedCalibrationPresets(await listCalibrationPresets())
+      } catch {
+        setCalibrationPresetError('Could not load calibration presets')
+      }
+    } finally {
+      setCalibrationPresetBusy(false)
+    }
+  }
+
   const saveCalibration = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!calibrationDraft) return
@@ -983,6 +1067,7 @@ function App() {
     if (!Number.isFinite(length) || !Number.isFinite(pixels) || length <= 0 || pixels <= 0) return
     const nextCalibration = { pixelsPerUnit: pixels / length, unit: calibrationUnit }
     setCalibration(nextCalibration)
+    collapseScale()
     applyDetectionAreaDefaults(nextCalibration, imageSize?.x ?? 0)
     setCalibrationDraft(null)
     setCalibrationLocked(false)
@@ -1006,14 +1091,44 @@ function App() {
       calibration,
       measurements,
     }
+    const record = createImageRecord(imageId, imageBlob, snapshot)
+    const nextSnapshots = setSnapshots.some((entry) => entry.id === imageId)
+      ? setSnapshots.map((entry) => entry.id === imageId ? record : entry)
+      : [...setSnapshots, record]
+    if (projectBinaryBytes(nextSnapshots, setAttachments) > MAX_PROJECT_BYTES) {
+      setAttachmentError('Set files exceed the 128 MiB project limit.')
+      return
+    }
+    setAttachmentError('')
     setMeasurementSet((current) => current.some((image) => image.id === imageId)
       ? current.map((image) => image.id === imageId ? snapshot : image)
       : [...current, snapshot])
-    const record = createImageRecord(imageId, imageBlob, snapshot)
     setSetSnapshots((current) => current.some((entry) => entry.id === imageId)
       ? current.map((entry) => entry.id === imageId ? record : entry)
       : [...current, record])
     setStatus(`${imageName} saved to measurement set`)
+  }
+
+  const addSetAttachments = (files: File[]) => {
+    if (!files.length) return
+    if (files.some((file) => !validAttachmentName(file.name))) {
+      setAttachmentError('An attachment has an invalid filename.')
+      return
+    }
+    if (setAttachments.length + files.length > MAX_SET_ATTACHMENTS) {
+      setAttachmentError('A set can contain at most 100 attachments.')
+      return
+    }
+    const additions: SetAttachment[] = files.map((file) => ({ id: crypto.randomUUID(), name: file.name, type: file.type, blob: file }))
+    if (projectBinaryBytes(setSnapshots, [...setAttachments, ...additions]) > MAX_PROJECT_BYTES) {
+      setAttachmentError('Set files exceed the 128 MiB project limit.')
+      return
+    }
+    setAttachmentError('')
+    const additionalBytes = files.reduce((total, file) => total + file.size, 0)
+    setAttachmentQuotaWarning(storageEstimate?.quota !== undefined && storageEstimate.usage !== undefined && additionalBytes > storageEstimate.quota - storageEstimate.usage
+      ? 'These files may exceed the available browser storage.' : '')
+    setSetAttachments((current) => [...current, ...additions])
   }
 
   const exportRawCsv = () => {
@@ -1098,7 +1213,7 @@ function App() {
     void exportProject([createImageRecord(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })])
   }
 
-  const activeSet = (): StoredMeasurementSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots })
+  const activeSet = (): StoredMeasurementSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots, attachments: setAttachments })
 
   const exportActiveProject = () => {
     if (!setSnapshots.length) {
@@ -1119,6 +1234,10 @@ function App() {
     setSetName(record.name)
     setSetUnit(record.unit)
     setSetSnapshots(record.images)
+    setSetAttachments(record.attachments)
+    setAttachmentError('')
+    setAttachmentQuotaWarning('')
+    setSetSaveError('')
     setMeasurementSet(record.images.map((entry) => ({ ...entry.metadata, id: entry.id })) as MeasurementSetImage[])
     if (record.images[0]) openStoredImageRecord(record.images[0])
     else setLibraryOpen(false)
@@ -1155,6 +1274,10 @@ function App() {
     setSetId(crypto.randomUUID())
     setSetName('')
     setSetSnapshots([])
+    setSetAttachments([])
+    setAttachmentError('')
+    setAttachmentQuotaWarning('')
+    setSetSaveError('')
     setMeasurementSet([])
   }
 
@@ -1163,6 +1286,10 @@ function App() {
     setSetName('')
     setSetUnit('µm')
     setSetSnapshots([])
+    setSetAttachments([])
+    setAttachmentError('')
+    setAttachmentQuotaWarning('')
+    setSetSaveError('')
     setMeasurementSet([])
     unloadImage()
   }
@@ -1174,12 +1301,22 @@ function App() {
   }
 
   const processImage = async (crop: ImageCrop, reduction: number) => {
-    if (!imageRef.current || calibration || measurements.length) return
+    if (!imageRef.current || !imageSize) throw new Error(t('No image loaded'))
+    if (!cropContainsBounds(crop, measurementBounds)) throw new Error(t('The crop must include all existing measurements.'))
+    if ((calibration || measurements.length) && reduction !== 1) throw new Error(t('Cropping keeps the original pixel scale and measurements.'))
+    const sourceEpoch = imageLoadEpochRef.current
+    const sourceImage = imageRef.current
     setCropBusy(true)
     try {
-      const png = await resampleMicroscopeImage(imageRef.current, crop, reduction)
+      const png = await resampleMicroscopeImage(sourceImage, crop, reduction)
+      if (sourceEpoch !== imageLoadEpochRef.current || sourceImage !== imageRef.current) throw new Error(t('Image changed while cropping. Please try again.'))
+      const croppedName = `${exportStem}-crop.png`
+      const imageRecord = calibration || measurements.length ? {
+        imageName: croppedName, imageWidth: crop.width, imageHeight: crop.height,
+        calibration, measurements: translateCroppedMeasurements(measurements, crop),
+      } : null
       setProcessingOpen(false)
-      loadImage(URL.createObjectURL(png), `${exportStem}-crop.png`, null, undefined, png)
+      loadImage(URL.createObjectURL(png), croppedName, imageRecord, undefined, png, true)
     } finally {
       setCropBusy(false)
     }
@@ -1269,6 +1406,7 @@ function App() {
   }
 
   const scaleText = calibration ? `1 ${calibration.unit} = ${calibration.pixelsPerUnit.toFixed(2)} px` : t('Not calibrated')
+  const panelTitle = processingOpen ? calibration || measurements.length ? 'Crop image' : 'Crop and resample' : calibration || measurements.length ? 'Measurements' : imageSize ? 'Image scale' : setSnapshots.length ? 'Measurement set' : 'Open image'
   const boxMeasurements = measurements.filter((measurement): measurement is Extract<Measurement, { kind: 'box' }> => measurement.kind === 'box')
     .map((measurement) => ({ ...measurement, rect: longAxisFirst(measurement.rect) }))
   const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
@@ -1280,13 +1418,24 @@ function App() {
   const qStats = summarize(overviewQ)
   const measurementUnit = calibration?.unit ?? 'px'
   const mycologicalTitle = boxMeasurements.length
-    ? `${formatMycologicalRange(lengthStats)} × ${formatMycologicalRange(widthStats)} ${measurementUnit}, Q = ${formatMycologicalNumber(qStats.min)}–${formatMycologicalNumber(qStats.max)}; N = ${boxMeasurements.length}, Me = ${formatMycologicalMedian(lengthStats.median)} × ${formatMycologicalMedian(widthStats.median)} ${measurementUnit}; Qe = ${formatMycologicalMedian(qStats.median)}`
+    ? formatMycologicalSummary(lengthStats, widthStats, qStats, measurementUnit, summarySettings, t('SD n/a'))
     : t('Add box measurements to calculate the spore summary.')
+  const summaryMethodLabels: Record<SummaryMethod, string> = {
+    'p10-p90': 'MYCOLOGICAL SUMMARY · 10–90 PERCENTILES',
+    'p05-p95': 'MYCOLOGICAL SUMMARY · 5–95 PERCENTILES',
+    sd1: 'MYCOLOGICAL SUMMARY · MEAN ± 1 SD',
+    sd2: 'MYCOLOGICAL SUMMARY · MEAN ± 2 SD',
+  }
   const setBoxes = measurementSetBoxes(measurementSet, setUnit)
   const setLengthStats = summarize(setBoxes.map((box) => box.length))
   const setWidthStats = summarize(setBoxes.map((box) => box.width))
   const setQStats = summarize(setBoxes.map((box) => box.q))
   const setMeasurementCount = measurementSet.reduce((total, image) => total + image.measurements.length, 0)
+  const setFileBytes = projectBinaryBytes(setSnapshots, setAttachments)
+  const attachmentWarning = attachmentQuotaWarning || (setFileBytes >= MAX_PROJECT_BYTES * 0.9
+    ? 'Set files are close to the 128 MiB project limit.'
+    : storageEstimate?.quota && storageEstimate.usage !== undefined && storageEstimate.usage >= storageEstimate.quota * 0.9
+      ? 'Browser storage is nearly full.' : '')
   const currentImageInSet = measurementSet.some((image) => image.id === imageId)
   const cropViewTransform = imageSize && canvasSize.x > 0 && canvasSize.y > 0 ? (() => {
     const scale = Math.max(0.01, Math.min((canvasSize.x - 64) / imageSize.x, (canvasSize.y - 64) / imageSize.y) * zoom)
@@ -1322,8 +1471,10 @@ function App() {
     const bounds = event.currentTarget.getBoundingClientRect()
     const endX = Math.max(0, Math.min(imageSize.x, Math.round((event.clientX - bounds.left - cropViewTransform.left) / cropViewTransform.scale)))
     const endY = Math.max(0, Math.min(imageSize.y, Math.round((event.clientY - bounds.top - cropViewTransform.top) / cropViewTransform.scale)))
-    if (start.handle) setCrop(adjustImageCrop(start.crop, start.handle, endX - start.x, endY - start.y, imageSize.x, imageSize.y))
-    else setCrop({ x: Math.min(start.x, endX), y: Math.min(start.y, endY), width: Math.max(1, Math.abs(endX - start.x)), height: Math.max(1, Math.abs(endY - start.y)) })
+    const next = start.handle
+      ? adjustImageCrop(start.crop, start.handle, endX - start.x, endY - start.y, imageSize.x, imageSize.y)
+      : { x: Math.min(start.x, endX), y: Math.min(start.y, endY), width: Math.max(1, Math.abs(endX - start.x)), height: Math.max(1, Math.abs(endY - start.y)) }
+    setCrop(constrainCropToBounds(next, measurementBounds, imageSize.x, imageSize.y, start.handle === 'move'))
   }
 
   return (
@@ -1378,10 +1529,10 @@ function App() {
             </div>
             <div className="canvas-status"><span className={`tool-dot ${tool}`} />{translateStatus(status, locale)}</div>
             {imageSize && <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>}
-            {imageSize && !calibration && measurements.length === 0 && <button className={`tool-button ${processingOpen ? 'is-active' : ''}`} type="button" title={t('Crop and resample before calibration')} aria-label={t('Crop and resample')} aria-pressed={processingOpen} onClick={() => processingOpen ? setProcessingOpen(false) : openCrop()}><Crop size={17} /></button>}
+            {imageSize && <button className={`tool-button ${processingOpen ? 'is-active' : ''}`} type="button" title={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample before calibration')} aria-label={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample')} aria-pressed={processingOpen} disabled={cropBusy || detecting || matchingBusy || selectingReference} onClick={() => processingOpen ? setProcessingOpen(false) : openCrop()}><Crop size={17} /></button>}
           </div>
           {calibration && boxMeasurements.length > 0 && <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
-            <span className="eyebrow">{t('MYCOLOGICAL SUMMARY · D1–D9 PERCENTILES')}</span>
+            <div className="summary-heading"><span className="eyebrow">{t(summaryMethodLabels[summarySettings.method])}</span><button className="tool-button" type="button" title={t('Configure mycological summary')} aria-label={t('Configure mycological summary')} onClick={() => setSummarySettingsOpen(true)}><Settings2 size={16} /></button></div>
             <strong>{mycologicalTitle}</strong>
           </section>}
           <div className={`canvas-wrap ${!imageSize ? 'is-empty' : ''}`} ref={viewRef}>
@@ -1414,7 +1565,7 @@ function App() {
                   if (!direction) return
                   event.preventDefault()
                   const step = event.shiftKey ? 10 : 1
-                  setCrop(adjustImageCrop(crop, handle, direction[0] * step, direction[1] * step, imageSize.x, imageSize.y))
+                  setCrop(constrainCropToBounds(adjustImageCrop(crop, handle, direction[0] * step, direction[1] * step, imageSize.x, imageSize.y), measurementBounds, imageSize.x, imageSize.y, handle === 'move'))
                 }}>{handle === 'move' && <Move size={20} aria-hidden="true" />}</button>)}
               </div>
             </div>}
@@ -1451,31 +1602,71 @@ function App() {
           <div className="panel-heading">
             <div>
               <span className="eyebrow">{t('ANALYSIS')}</span>
-              <h1>{t(processingOpen ? 'Crop and resample' : calibration || measurements.length ? 'Measurements' : imageSize ? 'Image scale' : setSnapshots.length ? 'Measurement set' : 'Open image')}</h1>
+              <h1 className={panelTitle === 'Measurements' ? 'measurements-heading' : undefined}>{t(panelTitle)}</h1>
             </div>
             {measurements.length > 0 && <span className="count-badge">{measurements.length.toString().padStart(2, '0')}</span>}
           </div>
 
-          {processingOpen && imageRef.current ? <ImageProcessingPanel image={imageRef.current} crop={crop} onCropChange={setCrop} reduction={reduction} onReductionChange={setReduction} onApply={processImage} onClose={() => setProcessingOpen(false)} t={t} /> : <>
+          {processingOpen && imageRef.current ? <ImageProcessingPanel image={imageRef.current} crop={crop} onCropChange={setCrop} reduction={reduction} onReductionChange={setReduction} measurementBounds={measurementBounds} preserveScale={!!calibration || measurements.length > 0} hasReference={!!sporeReference} onApply={processImage} onClose={() => setProcessingOpen(false)} t={t} /> : <>
           {imageSize && <section className="scale-section">
-            <div className="section-title"><span>{t('Image scale')}</span><button className="text-button" type="button" onClick={() => { setTool('calibrate'); setCalibrationDraft(null); setCalibrationLocked(false); setStatus('Click two points on a known scale bar') }}>{t('Calibrate')}</button></div>
-            <div className={`scale-readout ${calibration ? 'is-calibrated' : ''}`}>
+            <div className="section-title scale-summary">
+              <span>{t('Image scale')}</span>
+              {calibration ? <>
+                <span className="scale-summary-value">{scaleText}</span>
+                <button ref={scaleToggleRef} className="text-button" type="button" aria-label={t(scaleExpanded ? 'Close image scale settings' : 'Edit image scale')} aria-expanded={scaleExpanded} aria-controls="image-scale-settings" onClick={() => setScaleExpanded((expanded) => !expanded)}>{t(scaleExpanded ? 'Close' : 'Edit')}</button>
+              </> : <button className="text-button" type="button" onClick={startCalibration}>{t('Calibrate')}</button>}
+            </div>
+            <div id="image-scale-settings" hidden={!!calibration && !scaleExpanded}>
+            {calibration ? <button className="text-button scale-calibrate" type="button" onClick={startCalibration}>{t('Calibrate')}</button> : <>
+            <div className="scale-readout">
               <span className="scale-symbol" aria-hidden="true">↔</span>
               <span>{scaleText}</span>
-              <span className="scale-state">{t(calibration ? 'SET' : 'UNSET')}</span>
+              <span className="scale-state">{t('UNSET')}</span>
             </div>
-            {!calibration && <p className="scale-note">{t('Set a scale to convert pixels into real units.')}</p>}
+            <p className="scale-note">{t('Set a scale to convert pixels into real units.')}</p>
+            </>}
+            <div className="calibration-presets">
+              <select aria-label={t('Calibration preset')} value={selectedCalibrationPresetId} disabled={calibrationPresetBusy || !savedCalibrationPresets.length} onChange={(event) => {
+                const presetId = event.target.value
+                setSelectedCalibrationPresetId(presetId)
+                if (presetId) applyCalibrationPreset(presetId)
+                else setCalibrationPresetName('')
+              }}>
+                <option value="">{t(savedCalibrationPresets.length ? 'Choose preset' : 'No saved presets')}</option>
+                {savedCalibrationPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+              </select>
+              <div className="calibration-preset-name-row">
+                <input aria-label={t('Preset name')} placeholder={t('Preset name')} value={calibrationPresetName} maxLength={100} disabled={calibrationPresetBusy} onChange={(event) => setCalibrationPresetName(event.target.value)} />
+                <button className="button button-small" type="button" disabled={calibrationPresetBusy || !calibration || !calibrationPresetName.trim()} onClick={() => persistCalibrationPreset(selectedCalibrationPresetId || crypto.randomUUID(), calibrationPresetName)}><Save size={14} />{t('Save preset')}</button>
+              </div>
+              {selectedCalibrationPresetId && <div className="calibration-preset-actions">
+                <button className="text-button" type="button" disabled={calibrationPresetBusy || !calibrationPresetName.trim()} onClick={() => persistCalibrationPreset(selectedCalibrationPresetId, calibrationPresetName, true)}>{t('Rename')}</button>
+                <button className="tool-button" type="button" title={t('Delete preset')} aria-label={t('Delete preset')} disabled={calibrationPresetBusy} onClick={() => {
+                  const presetId = selectedCalibrationPresetId
+                  setCalibrationPresetBusy(true)
+                  setCalibrationPresetError('')
+                  void deleteCalibrationPreset(presetId).then(() => {
+                    setSavedCalibrationPresets((current) => current.filter((entry) => entry.id !== presetId))
+                    setSelectedCalibrationPresetId('')
+                    setCalibrationPresetName('')
+                    setStatus('Calibration preset deleted')
+                  }).catch(() => setCalibrationPresetError('Could not delete calibration preset')).finally(() => setCalibrationPresetBusy(false))
+                }}><Trash2 size={15} /></button>
+              </div>}
+              {calibrationPresetError && <p className="calibration-preset-error" role="alert">{t(calibrationPresetError)}</p>}
+            </div>
+            </div>
           </section>}
 
           {calibration && <section className="detection-settings" aria-labelledby="detection-settings-title">
-            <div className="section-title">
-              <span id="detection-settings-title">{t('Detection settings')}</span>
-              <button ref={previewButtonRef} className="text-button detection-preview-open" type="button" disabled={!imageSize || detecting} onClick={() => setPreviewOpen(true)}>{t('Detection preview')}</button>
-            </div>
             <button className="button button-primary auto-detect-button" type="button" disabled={!imageSize || detecting || selectingReference || matchingBusy} onClick={startAutoDetect}>
               {(detecting || matchingBusy) && <span className="activity-spinner" aria-hidden="true" />}
               {t(detecting || matchingBusy ? 'Detecting…' : 'Auto-detect')}
             </button>
+            <div className="section-title">
+              <span id="detection-settings-title">{t('Detection settings')}</span>
+              <button ref={previewButtonRef} className="text-button detection-preview-open" type="button" disabled={!imageSize || detecting} onClick={() => setPreviewOpen(true)}>{t('Detection preview')}</button>
+            </div>
             {selectingReference && <div className="auto-detect-step" role="status">
               <span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span>
               <button className="text-button" type="button" onClick={cancelAutoDetect}>{t('Cancel')}</button>
@@ -1616,6 +1807,7 @@ function App() {
             {calibration && measurements.length > 0 && <button className="button set-save-button" type="button" onClick={saveImageToSet}>
               <span aria-hidden="true">{currentImageInSet ? '↻' : '+'}</span> {t(currentImageInSet ? 'Update image in set' : 'Add image to set')}
             </button>}
+            {!setSnapshots.length && attachmentError && <p className="attachment-error" role="alert">{t(attachmentError)}</p>}
             {measurementSet.length > 0 && <>
               <ul className="set-image-list" aria-label={t('Images in measurement set')}>
                 {measurementSet.map((image) => (
@@ -1625,6 +1817,7 @@ function App() {
                   </li>
                 ))}
               </ul>
+              <SetAttachments attachments={setAttachments} totalBytes={setFileBytes} estimate={storageEstimate} estimateUnavailable={storageEstimateUnavailable} warning={attachmentWarning} error={attachmentError} saveError={setSaveError} onAdd={addSetAttachments} onRemove={(id) => { setSetAttachments((current) => current.filter((entry) => entry.id !== id)); setAttachmentError(''); setAttachmentQuotaWarning('') }} t={t} />
               <label className="detection-field"><span>{t('Set unit')}</span><select value={setUnit} onChange={(event) => setSetUnit(event.target.value as Unit)}>{units.map((unit) => <option key={unit}>{unit}</option>)}</select></label>
               <div className="overview-table" role="table" aria-label={t('Measurement set size and Q summary')}>
                 <div className="overview-row overview-header" role="row"><span role="columnheader">{t('Metric')}</span><span role="columnheader">{t('Mean ± SD')}</span><span role="columnheader">D1–D9</span></div>
@@ -1632,7 +1825,7 @@ function App() {
                 <div className="overview-row" role="row"><span role="rowheader">{t('Width')}</span><span role="cell">{formatSummary(setWidthStats, setUnit)}</span><span role="cell">{formatDeciles(setWidthStats, setUnit)}</span></div>
                 <div className="overview-row" role="row"><span role="rowheader">Q</span><span role="cell">{formatSummary(setQStats, '')}</span><span role="cell">{formatDeciles(setQStats, '')}</span></div>
               </div>
-              {setBoxes.length > 0 && <p className="set-summary">{formatMycologicalRange(setLengthStats)} × {formatMycologicalRange(setWidthStats)} {setUnit}, Q = {formatMycologicalNumber(setQStats.min)}–{formatMycologicalNumber(setQStats.max)}; N = {setBoxes.length}, Me = {formatMycologicalMedian(setLengthStats.median)} × {formatMycologicalMedian(setWidthStats.median)} {setUnit}; Qe = {formatMycologicalMedian(setQStats.median)}</p>}
+              {setBoxes.length > 0 && <div className="set-summary"><div className="summary-heading"><span className="eyebrow">{t(summaryMethodLabels[summarySettings.method])}</span><button className="tool-button" type="button" title={t('Configure mycological summary')} aria-label={t('Configure mycological summary')} onClick={() => setSummarySettingsOpen(true)}><Settings2 size={16} /></button></div><p>{formatMycologicalSummary(setLengthStats, setWidthStats, setQStats, setUnit, summarySettings, t('SD n/a'))}</p></div>}
               <div className="set-actions">
                 <button className="text-button" type="button" onClick={() => { const record = activeSet(); void exportProject(record.images, record) }}><Download size={14} />{t('Export set')}</button>
                 <button className="text-button" type="button" title={t('Combined measurement values with source image names; not an image record file')} onClick={() => exportCsv(measurementSetCsv(measurementSet, setUnit), 'mycrometer-set.csv')}>{t('Export set CSV')}</button>
@@ -1656,6 +1849,7 @@ function App() {
         </aside>
       </section>
       {libraryOpen && <ProjectLibrary imageRecords={savedImageRecords} sets={savedSets} activeImageRecordId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredImageRecord} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onDeleteMany={removeProjects} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
+      {summarySettingsOpen && <SummarySettingsDialog settings={summarySettings} onChange={setSummarySettings} onClose={() => setSummarySettingsOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
         {detectionNotice && detectionNotice.imageUrl === imageUrl && <>
           <strong>{t('No object found')}</strong>

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Download, FolderOpen, Trash2, X } from 'lucide-react'
-import { imageProcessingSize, type ImageCrop } from './imageResampler'
-import { formatStorageBytes, projectStorageBytes, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
+import { cropContainsBounds, imageProcessingSize, type ImageCrop } from './imageResampler'
+import type { SummarySettings } from './mycologicalSummary'
+import { formatStorageBytes, projectStorageBytes, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 
 type Translate = (key: string, values?: Record<string, string | number>) => string
 
@@ -12,10 +13,44 @@ function Dialog({ title, closeLabel, onClose, children }: { title: string; close
     dialog.showModal()
     return () => dialog.close()
   }, [])
-  return <dialog ref={ref} className="workspace-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }}>
+  return <dialog ref={ref} className="workspace-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }} onKeyDown={(event) => {
+    if (event.key === 'Escape' && !event.defaultPrevented) {
+      event.preventDefault()
+      event.stopPropagation()
+      onClose()
+    }
+  }}>
     <header className="workspace-dialog-header"><h2>{title}</h2><button className="tool-button" type="button" title={closeLabel} aria-label={closeLabel} onClick={onClose}><X size={18} /></button></header>
     {children}
   </dialog>
+}
+
+export function SummarySettingsDialog({ settings, onChange, onClose, t }: {
+  settings: SummarySettings; onChange: (settings: SummarySettings) => void; onClose: () => void; t: Translate
+}) {
+  return <Dialog title={t('Mycological summary settings')} closeLabel={t('Close')} onClose={onClose}>
+    <div className="summary-settings">
+      <label className="detection-field"><span>{t('Statistic')}</span><select value={settings.method} onChange={(event) => {
+        const method = event.target.value
+        if (method === 'p10-p90' || method === 'p05-p95' || method === 'sd1' || method === 'sd2') onChange({ ...settings, method })
+      }}>
+        <option value="p10-p90">{t('10–90 percentiles')}</option>
+        <option value="p05-p95">{t('5–95 percentiles')}</option>
+        <option value="sd1">{t('Mean ± 1 standard deviation')}</option>
+        <option value="sd2">{t('Mean ± 2 standard deviations')}</option>
+      </select></label>
+      <label className="detection-field"><span>{t('Format')}</span><select value={settings.extremes ? 'full' : 'simple'} onChange={(event) => onChange({ ...settings, extremes: event.target.value === 'full' })}>
+        <option value="full">{t('Full (with observed extremes)')}</option>
+        <option value="simple">{t('Simplified (without extremes or N)')}</option>
+      </select></label>
+      <label className="detection-field"><span>{t('Precision')}</span><select value={settings.decimals} onChange={(event) => onChange({ ...settings, decimals: event.target.value === '2' ? 2 : 1 })}>
+        <option value={1}>{t('Up to 1 decimal place')}</option>
+        <option value={2}>{t('Up to 2 decimal places')}</option>
+      </select></label>
+      <p>{t('Applies to image and set summaries. Overview tables and exports are unchanged.')}</p>
+      <button className="button" type="button" onClick={onClose}>{t('Close')}</button>
+    </div>
+  </Dialog>
 }
 
 function Thumbnail({ record }: { record: StoredImageRecord }) {
@@ -107,9 +142,72 @@ export function ProjectLibrary({ imageRecords, sets, activeImageRecordId, active
   </Dialog>
 }
 
-export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onReductionChange, onApply, onClose, t }: {
+function AttachmentRow({ attachment, onRemove, t }: { attachment: SetAttachment; onRemove: () => void; t: Translate }) {
+  const [urls, setUrls] = useState<{ download: string; preview?: string } | null>(null)
+  const [error, setError] = useState(false)
+  useEffect(() => {
+    let active = true
+    let download = ''
+    let preview = ''
+    setUrls(null)
+    setError(false)
+    void (async () => {
+      const header = new Uint8Array(await attachment.blob.slice(0, 12).arrayBuffer())
+      const starts = (...bytes: number[]) => bytes.every((byte, index) => header[index] === byte)
+      const ascii = (start: number, end: number) => String.fromCharCode(...header.slice(start, end))
+      const type = starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) ? 'image/png'
+        : starts(0xff, 0xd8, 0xff) ? 'image/jpeg'
+        : ['GIF87a', 'GIF89a'].includes(ascii(0, 6)) ? 'image/gif'
+        : ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP' ? 'image/webp'
+        : ascii(0, 5) === '%PDF-' ? 'application/pdf' : ''
+      if (!active) return
+      download = URL.createObjectURL(new Blob([attachment.blob], { type: 'application/octet-stream' }))
+      if (type) preview = URL.createObjectURL(new Blob([attachment.blob], { type }))
+      setUrls({ download, preview: preview || undefined })
+    })().catch(() => { if (active) setError(true) })
+    return () => {
+      active = false
+      if (download) URL.revokeObjectURL(download)
+      if (preview) URL.revokeObjectURL(preview)
+    }
+  }, [attachment])
+  return <li className="attachment-row">
+    <span className="attachment-detail"><strong>{attachment.name}</strong><small>{formatStorageBytes(attachment.blob.size)}</small></span>
+    {urls?.preview && <a className="text-button" href={urls.preview} target="_blank" rel="noopener noreferrer" aria-label={t('Open {name}', { name: attachment.name })}>{t('Open')}</a>}
+    {urls && <a className="text-button" href={urls.download} download={attachment.name} aria-label={t('Download {name}', { name: attachment.name })}>{t('Download')}</a>}
+    <button className="remove-button" type="button" aria-label={t('Remove {name}', { name: attachment.name })} title={t('Remove {name}', { name: attachment.name })} onClick={onRemove}>×</button>
+    {error && <span role="alert">{t('Could not open attachment.')}</span>}
+  </li>
+}
+
+export function SetAttachments({ attachments, totalBytes, estimate, estimateUnavailable, warning, error, saveError, onAdd, onRemove, t }: {
+  attachments: SetAttachment[]; totalBytes: number; estimate: StorageEstimate | null; estimateUnavailable: boolean
+  warning: string; error: string; saveError: string; onAdd: (files: File[]) => void; onRemove: (id: string) => void; t: Translate
+}) {
+  return <div className="set-attachments">
+    <details>
+      <summary>{t('Attachments ({count})', { count: attachments.length })}</summary>
+      <div className="attachment-content">
+        <label className="button button-small attachment-add">{t('Add files')}<input className="visually-hidden" type="file" multiple onChange={(event) => {
+          const files = Array.from(event.target.files ?? [])
+          event.target.value = ''
+          onAdd(files)
+        }} /></label>
+        {attachments.length > 0 && <ul className="attachment-list">{attachments.map((attachment) => <AttachmentRow key={attachment.id} attachment={attachment} onRemove={() => onRemove(attachment.id)} t={t} />)}</ul>}
+        <p>{t('Set file contents: {size} of 128 MiB; ZIP metadata also counts.', { size: formatStorageBytes(totalBytes) })}</p>
+        {estimateUnavailable ? <p>{t('Browser storage estimate unavailable.')}</p> : estimate?.usage !== undefined && estimate.quota !== undefined && <p>{t('Site storage: approximately {available} available ({used} of {quota} used).', { available: formatStorageBytes(Math.max(0, estimate.quota - estimate.usage)), used: formatStorageBytes(estimate.usage), quota: formatStorageBytes(estimate.quota) })}</p>}
+        {warning && <p className="attachment-warning" role="status">{t(warning)}</p>}
+      </div>
+    </details>
+    {error && <p className="attachment-error" role="alert">{t(error)}</p>}
+    {saveError && <p className="attachment-error" role="alert">{t(saveError)}</p>}
+  </div>
+}
+
+export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onReductionChange, measurementBounds, preserveScale, hasReference, onApply, onClose, t }: {
   image: HTMLImageElement; crop: ImageCrop; onCropChange: (crop: ImageCrop) => void
   reduction: number; onReductionChange: (reduction: number) => void
+  measurementBounds: ImageCrop | null; preserveScale: boolean; hasReference: boolean
   onApply: (crop: ImageCrop, reduction: number) => Promise<void>; onClose: () => void; t: Translate
 }) {
   const [busy, setBusy] = useState(false)
@@ -134,18 +232,23 @@ export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onR
 
   let output: { width: number; height: number } | null = null
   try { output = imageProcessingSize(image.naturalWidth, image.naturalHeight, crop, reduction) } catch {}
-  return <section className="image-processing-panel" aria-label={t('Crop and resample')}>
+  const containsMeasurements = cropContainsBounds(crop, measurementBounds)
+  return <section className="image-processing-panel" aria-label={t(preserveScale ? 'Crop image' : 'Crop and resample')}>
     <form ref={formRef} className="image-processing-form" onSubmit={(event) => {
       event.preventDefault()
-      if (!output || busy) return
+      if (!output || !containsMeasurements || busy) return
       setBusy(true)
       void onApply(crop, reduction).catch((failure) => { setError(String(failure)); setBusy(false) })
     }}>
       <div className="crop-fields">{(['x', 'y', 'width', 'height'] as const).map((key) => <label key={key}>{t(key === 'x' ? 'Crop X' : key === 'y' ? 'Crop Y' : key === 'width' ? 'Crop width' : 'Crop height')}<input type="number" min={key === 'x' || key === 'y' ? 0 : 1} step="1" required disabled={busy} value={crop[key]} onChange={(event) => onCropChange({ ...crop, [key]: Number(event.target.value) })} /></label>)}</div>
-      <label className="detection-field"><span>{t('Reduction factor')} <strong>{reduction.toFixed(1)}x</strong></span><input aria-label={t('Reduction factor')} type="range" min="1" max="1.5" step="0.1" value={reduction} disabled={busy} onChange={(event) => onReductionChange(Number(event.target.value))} /></label>
+      {preserveScale ? <p>{t('Cropping keeps the original pixel scale and measurements.')}</p> : <label className="detection-field"><span>{t('Reduction factor')} <strong>{reduction.toFixed(1)}x</strong></span><input aria-label={t('Reduction factor')} type="range" min="1" max="1.5" step="0.1" value={reduction} disabled={busy} onChange={(event) => onReductionChange(Number(event.target.value))} /></label>}
+      <p>{t('Cropping creates a new image; saved originals and set snapshots are unchanged.')}</p>
+      {measurementBounds && containsMeasurements && <p>{t('The crop must include all existing measurements.')}</p>}
+      {hasReference && <p>{t('Cropping clears the detection reference and candidates.')}</p>}
       <output>{output ? `${output.width} x ${output.height} px / PNG` : t('Invalid crop')}</output>
+      {!containsMeasurements && <p role="alert">{t('The crop must include all existing measurements.')}</p>}
       {error && <p role="alert">{error}</p>}
-      <div className="project-form-actions"><button className="button button-small" type="button" disabled={busy} onClick={() => { onCropChange({ x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight }); onReductionChange(1) }}>{t('Reset')}</button><button className="button button-small" type="button" disabled={busy} onClick={onClose}>{t('Cancel crop')}</button><button className="button button-primary" type="submit" disabled={!output || busy}>{t(busy ? 'Processing' : 'Apply crop')}</button></div>
+      <div className="project-form-actions"><button className="button button-small" type="button" disabled={busy} onClick={() => { onCropChange({ x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight }); onReductionChange(1) }}>{t('Reset')}</button><button className="button button-small" type="button" disabled={busy} onClick={onClose}>{t('Cancel crop')}</button><button className="button button-primary" type="submit" disabled={!output || !containsMeasurements || busy}>{t(busy ? 'Processing' : 'Apply crop')}</button></div>
     </form>
   </section>
 }
