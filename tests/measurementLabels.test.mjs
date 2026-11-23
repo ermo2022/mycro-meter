@@ -176,3 +176,90 @@ test('box editor deletion removes only the saved measurement and is unavailable 
   assert.ok(editorDeclaration.getText(source).includes("onClick={onClose}>{t('Cancel')}"))
   assert.ok(editorDeclaration.getText(source).includes("onClick={onAccept}"))
 })
+
+test('opening, accepting or cancelling box edits preserves the active tool', () => {
+  const declarations = new Map()
+  let closeExpression
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && ['openMeasurementEditor', 'acceptBoxEdit'].includes(node.name.text)) {
+      declarations.set(node.name.text, node.initializer.getText(source))
+    }
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === 'BoxEditorDialog') {
+      closeExpression = node.attributes.properties.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'onClose')?.initializer.expression.getText(source)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert.ok(closeExpression)
+  const action = (expression, dependencies) => {
+    const { outputText } = ts.transpileModule(`const action = ${expression}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } })
+    return new Function(...Object.keys(dependencies), `${outputText}; return action`)(...Object.values(dependencies))
+  }
+  const rect = { centerX: 20, centerY: 20, width: 10, height: 8, angle: 0 }
+  for (const originalTool of ['measure', 'select', 'pan', 'calibrate']) {
+    for (const outcome of ['accept', 'cancel']) {
+      let tool = originalTool
+      let editor
+      let measurements = [{ id: 1, kind: 'box', objectId: 'original', rect, name: 'B1' }]
+      const dependencies = {
+        calibration: { pixelsPerUnit: 1, unit: 'µm' },
+        longAxisFirst: value => value,
+        setSelectingReference: () => {},
+        setTool: value => { tool = value },
+        setBoxEditor: value => { editor = value },
+        setStatus: () => {},
+      }
+      action(declarations.get('openMeasurementEditor'), dependencies)(measurements[0])
+      assert.equal(tool, originalTool)
+      const resized = { ...rect, width: 14 }
+      editor = { ...editor, rect: resized }
+      const editorDependencies = {
+        ...dependencies,
+        boxEditor: editor,
+        editingReviewId: null,
+        selectingReference: false,
+        measurements,
+        setMeasurements: update => { measurements = update(measurements) },
+        formatLength: value => String(value),
+      }
+      action(outcome === 'accept' ? declarations.get('acceptBoxEdit') : closeExpression, editorDependencies)()
+      assert.equal(tool, originalTool, `${originalTool} after ${outcome}`)
+      assert.equal(editor, null)
+      assert.deepEqual(measurements[0].rect, outcome === 'accept' ? resized : rect)
+    }
+  }
+
+  let tool = 'measure'
+  let measurements = []
+  const manualBox = { objectId: 'manual-1', measurementId: null, rect }
+  action(declarations.get('acceptBoxEdit'), {
+    calibration: { pixelsPerUnit: 1, unit: 'µm' },
+    boxEditor: manualBox,
+    editingReviewId: null,
+    selectingReference: false,
+    measurements,
+    longAxisFirst: value => value,
+    setMeasurements: update => { measurements = update(measurements) },
+    setBoxEditor: () => {},
+    setTool: value => { tool = value },
+    setStatus: () => {},
+    formatLength: value => String(value),
+  })()
+  assert.equal(tool, 'measure')
+  assert.equal(measurements.length, 1)
+  assert.deepEqual(measurements[0].rect, rect)
+})
+
+test('touch box handles retain usable screen sizes as the canvas changes size', () => {
+  const definition = source.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'boxEditorHandleMetrics')
+  assert.ok(definition)
+  const { outputText } = ts.transpileModule(definition.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } })
+  const metrics = new Function(`${outputText}; return boxEditorHandleMetrics`)()
+  for (const width of [280, 500, 800]) {
+    const result = metrics(960, width, true)
+    for (const [actual, expected] of [[result.resizeSize, 16], [result.rotateRadius, 10], [result.hitRadius, 22], [result.rotationOffset, 32]]) {
+      assert.ok(Math.abs(actual * width / 960 - expected) < 1e-9)
+    }
+  }
+  assert.deepEqual(metrics(960, 800, false), { resizeSize: 14, rotateRadius: 8, hitRadius: 26, rotationOffset: 28, viewportInset: 32, strokeWidth: 1.5 })
+})

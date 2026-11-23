@@ -3,7 +3,7 @@ import * as UTIF from 'utif'
 import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Settings2, Trash2, X } from 'lucide-react'
 import { adjustImageCrop, constrainCropToBounds, cropContainsBounds, measurementCropBounds, resampleMicroscopeImage, translateCroppedMeasurements, type CropHandle, type ImageCrop } from './imageResampler'
 import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listCalibrationPresets, listProjects, MAX_PROJECT_BYTES, MAX_SET_ATTACHMENTS, projectBinaryBytes, saveCalibrationPreset, saveImageRecord, saveSet, validAttachmentName, type CalibrationPreset, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
-import { ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
+import { CameraDialog, ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
 import { formatDeciles, formatMycologicalSummary, formatSummary, summarize, type SummaryMethod, type SummarySettings } from './mycologicalSummary'
 import { DetectionReviewDialog, type DetectionReviewItem } from './DetectionReviewDialog'
 import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
@@ -222,6 +222,7 @@ function App() {
   const [calibrationPresetBusy, setCalibrationPresetBusy] = useState(false)
   const [calibrationPresetError, setCalibrationPresetError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
+  const [cameraOpen, setCameraOpen] = useState(false)
   const [summarySettingsOpen, setSummarySettingsOpen] = useState(false)
   const [summarySettings, setSummarySettings] = useState<SummarySettings>(() => {
     const method = window.localStorage.getItem('mycrometer-summary-method')
@@ -1344,7 +1345,6 @@ function App() {
       : boxFromRegion(regionBetween(measurement.start, measurement.end))
     const objectId = measurement.kind === 'box' ? measurement.objectId : `manual-${measurement.id}`
     setSelectingReference(false)
-    setTool('select')
     setBoxEditor({ objectId, measurementId: measurement.id, rect })
   }
 
@@ -1364,7 +1364,6 @@ function App() {
       setSporeReference({ rect, features: null, matches: null })
       setSelectingReference(false)
       setBoxEditor(null)
-      setTool('measure')
       setStatus('Analysing reference spore…')
       return
     }
@@ -1384,7 +1383,6 @@ function App() {
     setBoxEditor(null)
     const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
     const unit = calibration?.unit ?? 'px'
-    setTool(boxEditor.measurementId === null && boxEditor.objectId.startsWith('clicked-') ? 'measure' : 'select')
     setStatus(`Box accepted · ${formatLength(rect.width / pixelsPerUnit)} × ${formatLength(rect.height / pixelsPerUnit)} ${unit}`)
   }
 
@@ -1492,6 +1490,7 @@ function App() {
           <button className="button button-quiet" type="button" title={t('Import ZIP project or image record CSV')} onClick={() => importInputRef.current?.click()}>{t('Import project')}</button>
           <input ref={importInputRef} className="visually-hidden" type="file" accept=".zip,.myproj,.csv,application/zip,text/csv,image/*" multiple onChange={handleImport} />
           <button className="button button-quiet" type="button" onClick={() => fileInputRef.current?.click()}>{t(imageUrl ? 'Replace image' : 'Open image')}</button>
+          <button className="button button-quiet" type="button" onClick={() => setCameraOpen(true)}>{t('Camera')}</button>
           {imageUrl && <button className="button button-unload" type="button" title={t('Unload image and clear its measurements')} onClick={unloadImage}><span aria-hidden="true">×</span> {t('Unload')}</button>}
           <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" onChange={handleUpload} />
         </div>
@@ -1548,13 +1547,16 @@ function App() {
                 className={`measurement-canvas cursor-${tool}`}
               />
             ) : (
-              <button className="empty-state" type="button" onClick={() => fileInputRef.current?.click()}>
+              <div className="empty-state">
                 <span className="empty-target" aria-hidden="true"><i /></span>
                 <strong>{t("Let's measure some spores")}</strong>
                 <span>{pendingImport ? t('Open {imageName} to restore its measurements', { imageName: pendingImport.imageName }) : t('Open a microscope image to start measuring')}</span>
-                <span className="button button-primary">{t('Choose image')}</span>
+                <div className="empty-actions">
+                  <button className="button button-primary" type="button" onClick={() => fileInputRef.current?.click()}>{t('Choose image')}</button>
+                  <button className="button button-primary" type="button" onClick={() => setCameraOpen(true)}>{t('Use camera')}</button>
+                </div>
                 <span className="supported-types">TIFF · PNG · JPEG · WEBP</span>
-              </button>
+              </div>
             )}
             {processingOpen && imageSize && cropViewTransform && <div className="crop-workspace-overlay" onPointerDown={cropPointerDown} onPointerMove={cropPointerMove} onPointerUp={(event) => { if (cropDragRef.current?.pointerId === event.pointerId) cropDragRef.current = null }} onPointerCancel={() => { cropDragRef.current = null }} onLostPointerCapture={() => { cropDragRef.current = null }}>
               <div className="crop-outline" style={{ left: cropViewTransform.left + crop.x * cropViewTransform.scale, top: cropViewTransform.top + crop.y * cropViewTransform.scale, width: crop.width * cropViewTransform.scale, height: crop.height * cropViewTransform.scale }}>
@@ -1849,6 +1851,10 @@ function App() {
         </aside>
       </section>
       {libraryOpen && <ProjectLibrary imageRecords={savedImageRecords} sets={savedSets} activeImageRecordId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredImageRecord} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onDeleteMany={removeProjects} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
+      {cameraOpen && <CameraDialog onClose={() => setCameraOpen(false)} onCapture={(blob) => {
+        setCameraOpen(false)
+        loadImage(URL.createObjectURL(blob), `camera-${new Date().toISOString().replace(/[:.]/g, '-')}.png`, null, undefined, blob)
+      }} t={t} />}
       {summarySettingsOpen && <SummarySettingsDialog settings={summarySettings} onChange={setSummarySettings} onClose={() => setSummarySettingsOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
         {detectionNotice && detectionNotice.imageUrl === imageUrl && <>
@@ -2226,6 +2232,12 @@ type BoxEditorDialogProps = {
   onClose: () => void
 }
 
+function boxEditorHandleMetrics(canvasWidth: number, displayWidth: number, touchLayout: boolean) {
+  if (!touchLayout || displayWidth <= 0) return { resizeSize: 14, rotateRadius: 8, hitRadius: 26, rotationOffset: 28, viewportInset: 32, strokeWidth: 1.5 }
+  const scale = canvasWidth / displayWidth
+  return { resizeSize: 16 * scale, rotateRadius: 10 * scale, hitRadius: 22 * scale, rotationOffset: 32 * scale, viewportInset: 44 * scale, strokeWidth: 1.5 * scale }
+}
+
 function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pixelsPerUnit, onChange, translate: t, onAccept, onDelete, onClose }: BoxEditorDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -2244,6 +2256,14 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
   onCloseRef.current = onClose
 
   useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const observer = new ResizeObserver(() => setViewVersion((version) => version + 1))
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
     closeButtonRef.current?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onCloseRef.current()
@@ -2258,6 +2278,7 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     if (!canvas || !context) return
     canvas.width = canvasWidth
     canvas.height = canvasHeight
+    const handles = boxEditorHandleMetrics(canvasWidth, canvas.getBoundingClientRect().width, window.matchMedia('(max-width: 860px), (pointer: coarse)').matches)
     context.fillStyle = '#17221e'
     context.fillRect(0, 0, canvasWidth, canvasHeight)
     context.imageSmoothingEnabled = true
@@ -2272,7 +2293,8 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
       const cropHeight = Math.min(imageSize.y, Math.max(1, bounds.height + paddingY * 2))
       const cropX = clamp(bounds.x + bounds.width / 2 - cropWidth / 2, 0, imageSize.x - cropWidth)
       const cropY = clamp(bounds.y + bounds.height / 2 - cropHeight / 2, 0, imageSize.y - cropHeight)
-      const scale = Math.min((canvasWidth - 64) / cropWidth, (canvasHeight - 64) / cropHeight)
+      const inset = Math.min(handles.viewportInset, (canvasHeight - 1) / 2)
+      const scale = Math.min((canvasWidth - inset * 2) / cropWidth, (canvasHeight - inset * 2) / cropHeight)
       const offsetX = (canvasWidth - cropWidth * scale) / 2
       const offsetY = (canvasHeight - cropHeight * scale) / 2
       transform = { cropX, cropY, cropWidth, cropHeight, scale, offsetX, offsetY }
@@ -2299,7 +2321,7 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     })
     const corners = boxCorners(editor.rect).map(toCanvas)
     const north = toCanvas(boxHandles(editor.rect, 0).find((handle) => handle.handle === 'n')!)
-    const rotationHandle = toCanvas(boxHandles(editor.rect, 28 / scale).find((handle) => handle.handle === 'rotate')!)
+    const rotationHandle = toCanvas(boxHandles(editor.rect, handles.rotationOffset / scale).find((handle) => handle.handle === 'rotate')!)
     context.strokeStyle = '#ef6248'
     context.lineWidth = 2
     context.beginPath()
@@ -2311,23 +2333,23 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     context.moveTo(north.x, north.y)
     context.lineTo(rotationHandle.x, rotationHandle.y)
     context.stroke()
-    boxHandles(editor.rect, 28 / scale).forEach(({ handle, ...sourceHandle }) => {
+    boxHandles(editor.rect, handles.rotationOffset / scale).forEach(({ handle, ...sourceHandle }) => {
       const { x, y } = toCanvas(sourceHandle)
       if (handle === 'rotate') {
         context.beginPath()
         context.fillStyle = '#d7f06a'
         context.strokeStyle = '#536a35'
-        context.lineWidth = 1.5
-        context.arc(x, y, 8, 0, Math.PI * 2)
+        context.lineWidth = handles.strokeWidth
+        context.arc(x, y, handles.rotateRadius, 0, Math.PI * 2)
         context.fill()
         context.stroke()
         return
       }
       context.fillStyle = '#fffdf1'
-      context.fillRect(x - 7, y - 7, 14, 14)
+      context.fillRect(x - handles.resizeSize / 2, y - handles.resizeSize / 2, handles.resizeSize, handles.resizeSize)
       context.strokeStyle = '#b43c2b'
-      context.lineWidth = 1.5
-      context.strokeRect(x - 7, y - 7, 14, 14)
+      context.lineWidth = handles.strokeWidth
+      context.strokeRect(x - handles.resizeSize / 2, y - handles.resizeSize / 2, handles.resizeSize, handles.resizeSize)
     })
   }, [canvasHeight, canvasWidth, editor, image, imageSize, viewVersion])
 
@@ -2398,7 +2420,8 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
         return
       }
     }
-    const handles = boxHandles(editor.rect, 28 / transform.scale).map(({ handle, x, y }) => ({
+    const metrics = boxEditorHandleMetrics(canvasWidth, event.currentTarget.getBoundingClientRect().width, window.matchMedia('(max-width: 860px), (pointer: coarse)').matches)
+    const handles = boxHandles(editor.rect, metrics.rotationOffset / transform.scale).map(({ handle, x, y }) => ({
       handle,
       x: transform.offsetX + (x - transform.cropX) * transform.scale,
       y: transform.offsetY + (y - transform.cropY) * transform.scale,
@@ -2406,7 +2429,7 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     const nearest = handles
       .map((handle) => ({ ...handle, distance: Math.hypot(handle.x - point.x, handle.y - point.y) }))
       .sort((a, b) => a.distance - b.distance)[0]
-    if (!nearest || nearest.distance > 26) {
+    if (!nearest || nearest.distance > metrics.hitRadius) {
       panRef.current = { pointerId: event.pointerId, point }
       event.currentTarget.setPointerCapture(event.pointerId)
       return
