@@ -25,6 +25,11 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .workspace-dialog::backdrop { background: #08100d99; }
 .workspace-dialog-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--paper); }
 .workspace-dialog-header h2 { margin: 0; font-size: 18px; }
+.summary-settings { display: grid; gap: 12px; padding: 16px; }
+.summary-settings .detection-field { margin: 0; }
+.summary-settings select { min-width: 0; width: 100%; min-height: 40px; padding: 6px 8px; border: 1px solid #cbd3c9; border-radius: 3px; background: #fff; }
+.summary-settings p { margin: 0; color: #526057; font-size: 12px; line-height: 1.5; }
+.summary-settings > button { justify-self: start; }
 .project-tabs { display: flex; border-bottom: 1px solid var(--line); }
 .project-tabs button { flex: 1; min-height: 44px; padding: 8px; border: 0; border-bottom: 2px solid transparent; background: transparent; cursor: pointer; }
 .project-tabs button[aria-selected="true"] { border-bottom-color: #22826c; background: #edf4d6; }
@@ -182,6 +187,8 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .spore-title-bar { display: grid; gap: 4px; padding: 8px 16px 9px; color: #263a31; border-bottom: 1px solid var(--line); background: #f4f6ee; }
 .spore-title-bar .eyebrow { color: #67766c; font-size: 9px; }
 .spore-title-bar strong { font-family: var(--mono); font-size: 12px; font-weight: 500; line-height: 1.55; overflow-wrap: anywhere; }
+.summary-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.summary-heading .tool-button { flex: 0 0 40px; width: 40px; height: 40px; }
 .tool-dot { width: 6px; height: 6px; border-radius: 50%; background: #b4beb7; }
 .tool-dot.measure { background: var(--red); }
 .tool-dot.calibrate { background: #21836c; }
@@ -376,6 +383,7 @@ kbd { min-width: 15px; padding: 1px 3px; color: #59695b; border: 1px solid #b2c2
 .measurement-set-section .overview-row > span { min-width: 0; overflow-wrap: anywhere; }
 .set-header-actions { display: flex; align-items: center; gap: 6px; }
 .set-summary { margin: 12px 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.set-summary p { margin: 4px 0 0; }
 .set-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 12px; }
 .summary-line.set-total { margin: 12px 0 0; }
 .panel-bottom { padding: 14px 21px 17px; }

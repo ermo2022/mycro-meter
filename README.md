@@ -70,7 +70,7 @@ The preview's **Noise reduction** selector offers **Current smoothing** (the ori
 
 In the overview, length and width use the major and minor box axes. Q is length divided by width. Mean ± SD uses sample standard deviation (`n - 1`); for `N = 1`, SD is shown as not applicable. D1–D9 is the linearly interpolated 10th–90th percentile range, with observed extremes outside that range in parentheses. N counts the box measurements used in the spore summary.
 
-The mycological summary above the image displays D1–D9 dimensional ranges, with observed extremes outside that range in parentheses, followed by Q range, N, Me (median length × median width), and Qe (median Q).
+Use the settings button beside the mycological summary above the image or in the set to choose 10–90 (default) or 5–95 percentiles, or mean ± 1 or 2 sample standard deviations. The selected statistic applies to length, width, and Q in both summaries. The full format includes N and observed extremes outside the percentile range in parentheses, or the observed minimum–maximum in square brackets for mean ± SD; simplified format omits N and extremes. Me (median length × median width) and Qe (median Q) remain visible. Choose up to one (default) or two decimal places; trailing zeros are omitted. SD is unavailable for a single box. Settings are remembered in this browser profile and affect only these summaries, not the overview tables, measurements, or exports.
 
 ## Multi-Image Sets
 

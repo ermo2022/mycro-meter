@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
 import * as UTIF from 'utif'
-import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react'
+import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Settings2, Trash2, X } from 'lucide-react'
 import { adjustImageCrop, constrainCropToBounds, cropContainsBounds, measurementCropBounds, resampleMicroscopeImage, translateCroppedMeasurements, type CropHandle, type ImageCrop } from './imageResampler'
 import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listCalibrationPresets, listProjects, MAX_PROJECT_BYTES, MAX_SET_ATTACHMENTS, projectBinaryBytes, saveCalibrationPreset, saveImageRecord, saveSet, validAttachmentName, type CalibrationPreset, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
-import { ImageProcessingPanel, ProjectLibrary, SetAttachments } from './WorkspaceDialogs'
+import { ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
+import { formatDeciles, formatMycologicalSummary, formatSummary, summarize, type SummaryMethod, type SummarySettings } from './mycologicalSummary'
 import { DetectionReviewDialog, type DetectionReviewItem } from './DetectionReviewDialog'
 import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
 import { extractReferenceFeatures, type ReferenceFeatures } from './referenceFeatures'
@@ -194,59 +195,6 @@ function boxFromRegion(region: DetectionRegion): BoxRectangle {
   })
 }
 
-type SummaryStats = { n: number; mean: number; sampleSd: number | null; min: number; max: number; median: number; p10: number; p90: number }
-
-function summarize(values: number[]): SummaryStats {
-  if (!values.length) return { n: 0, mean: 0, sampleSd: null, min: 0, max: 0, median: 0, p10: 0, p90: 0 }
-  const sorted = [...values].sort((a, b) => a - b)
-  const mean = values.reduce((total, value) => total + value, 0) / values.length
-  const sampleSd = values.length < 2
-    ? null
-    : Math.sqrt(values.reduce((total, value) => total + (value - mean) ** 2, 0) / (values.length - 1))
-  const percentile = (fraction: number) => {
-    const position = (sorted.length - 1) * fraction
-    const lower = Math.floor(position)
-    const upper = Math.ceil(position)
-    return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower)
-  }
-  return {
-    n: values.length,
-    mean,
-    sampleSd,
-    min: sorted[0],
-    max: sorted[sorted.length - 1],
-    median: percentile(0.5),
-    p10: percentile(0.1),
-    p90: percentile(0.9),
-  }
-}
-
-function formatSummary(stats: SummaryStats, unit: string) {
-  if (!stats.n) return '—'
-  if (stats.sampleSd === null) return `${formatMycologicalNumber(stats.mean)} (SD n/a)${unit ? ` ${unit}` : ''}`
-  return `${formatMycologicalNumber(stats.mean)} ± ${formatMycologicalNumber(stats.sampleSd)}${unit ? ` ${unit}` : ''}`
-}
-
-function formatDeciles(stats: SummaryStats, unit: string) {
-  if (!stats.n) return '—'
-  const range = formatMycologicalRange(stats)
-  return `${range}${unit ? ` ${unit}` : ''}`
-}
-
-function formatMycologicalNumber(value: number) {
-  return Number(value.toFixed(1)).toString()
-}
-
-function formatMycologicalMedian(value: number) {
-  return formatMycologicalNumber(value)
-}
-
-function formatMycologicalRange(stats: SummaryStats) {
-  const lower = stats.min < stats.p10 ? `(${formatMycologicalNumber(stats.min)}) ` : ''
-  const upper = stats.max > stats.p90 ? ` (${formatMycologicalNumber(stats.max)})` : ''
-  return `${lower}${formatMycologicalNumber(stats.p10)}–${formatMycologicalNumber(stats.p90)}${upper}`
-}
-
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const imageRef = useRef<HTMLImageElement | null>(null)
@@ -274,6 +222,15 @@ function App() {
   const [calibrationPresetBusy, setCalibrationPresetBusy] = useState(false)
   const [calibrationPresetError, setCalibrationPresetError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
+  const [summarySettingsOpen, setSummarySettingsOpen] = useState(false)
+  const [summarySettings, setSummarySettings] = useState<SummarySettings>(() => {
+    const method = window.localStorage.getItem('mycrometer-summary-method')
+    return {
+      method: method === 'p05-p95' || method === 'sd1' || method === 'sd2' ? method : 'p10-p90',
+      extremes: window.localStorage.getItem('mycrometer-summary-extremes') !== 'false',
+      decimals: window.localStorage.getItem('mycrometer-summary-decimals') === '2' ? 2 : 1,
+    }
+  })
   const [processingOpen, setProcessingOpen] = useState(false)
   const [cropBusy, setCropBusy] = useState(false)
   const [crop, setCrop] = useState<ImageCrop>({ x: 0, y: 0, width: 1, height: 1 })
@@ -444,6 +401,12 @@ function App() {
     window.localStorage.setItem('mycrometer-language', language)
     document.documentElement.lang = language
   }, [language])
+
+  useEffect(() => {
+    window.localStorage.setItem('mycrometer-summary-method', summarySettings.method)
+    window.localStorage.setItem('mycrometer-summary-extremes', String(summarySettings.extremes))
+    window.localStorage.setItem('mycrometer-summary-decimals', String(summarySettings.decimals))
+  }, [summarySettings])
 
   useEffect(() => {
     const storage = navigator.storage
@@ -1455,8 +1418,14 @@ function App() {
   const qStats = summarize(overviewQ)
   const measurementUnit = calibration?.unit ?? 'px'
   const mycologicalTitle = boxMeasurements.length
-    ? `${formatMycologicalRange(lengthStats)} × ${formatMycologicalRange(widthStats)} ${measurementUnit}, Q = ${formatMycologicalNumber(qStats.min)}–${formatMycologicalNumber(qStats.max)}; N = ${boxMeasurements.length}, Me = ${formatMycologicalMedian(lengthStats.median)} × ${formatMycologicalMedian(widthStats.median)} ${measurementUnit}; Qe = ${formatMycologicalMedian(qStats.median)}`
+    ? formatMycologicalSummary(lengthStats, widthStats, qStats, measurementUnit, summarySettings, t('SD n/a'))
     : t('Add box measurements to calculate the spore summary.')
+  const summaryMethodLabels: Record<SummaryMethod, string> = {
+    'p10-p90': 'MYCOLOGICAL SUMMARY · 10–90 PERCENTILES',
+    'p05-p95': 'MYCOLOGICAL SUMMARY · 5–95 PERCENTILES',
+    sd1: 'MYCOLOGICAL SUMMARY · MEAN ± 1 SD',
+    sd2: 'MYCOLOGICAL SUMMARY · MEAN ± 2 SD',
+  }
   const setBoxes = measurementSetBoxes(measurementSet, setUnit)
   const setLengthStats = summarize(setBoxes.map((box) => box.length))
   const setWidthStats = summarize(setBoxes.map((box) => box.width))
@@ -1563,7 +1532,7 @@ function App() {
             {imageSize && <button className={`tool-button ${processingOpen ? 'is-active' : ''}`} type="button" title={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample before calibration')} aria-label={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample')} aria-pressed={processingOpen} disabled={cropBusy || detecting || matchingBusy || selectingReference} onClick={() => processingOpen ? setProcessingOpen(false) : openCrop()}><Crop size={17} /></button>}
           </div>
           {calibration && boxMeasurements.length > 0 && <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
-            <span className="eyebrow">{t('MYCOLOGICAL SUMMARY · D1–D9 PERCENTILES')}</span>
+            <div className="summary-heading"><span className="eyebrow">{t(summaryMethodLabels[summarySettings.method])}</span><button className="tool-button" type="button" title={t('Configure mycological summary')} aria-label={t('Configure mycological summary')} onClick={() => setSummarySettingsOpen(true)}><Settings2 size={16} /></button></div>
             <strong>{mycologicalTitle}</strong>
           </section>}
           <div className={`canvas-wrap ${!imageSize ? 'is-empty' : ''}`} ref={viewRef}>
@@ -1856,7 +1825,7 @@ function App() {
                 <div className="overview-row" role="row"><span role="rowheader">{t('Width')}</span><span role="cell">{formatSummary(setWidthStats, setUnit)}</span><span role="cell">{formatDeciles(setWidthStats, setUnit)}</span></div>
                 <div className="overview-row" role="row"><span role="rowheader">Q</span><span role="cell">{formatSummary(setQStats, '')}</span><span role="cell">{formatDeciles(setQStats, '')}</span></div>
               </div>
-              {setBoxes.length > 0 && <p className="set-summary">{formatMycologicalRange(setLengthStats)} × {formatMycologicalRange(setWidthStats)} {setUnit}, Q = {formatMycologicalNumber(setQStats.min)}–{formatMycologicalNumber(setQStats.max)}; N = {setBoxes.length}, Me = {formatMycologicalMedian(setLengthStats.median)} × {formatMycologicalMedian(setWidthStats.median)} {setUnit}; Qe = {formatMycologicalMedian(setQStats.median)}</p>}
+              {setBoxes.length > 0 && <div className="set-summary"><div className="summary-heading"><span className="eyebrow">{t(summaryMethodLabels[summarySettings.method])}</span><button className="tool-button" type="button" title={t('Configure mycological summary')} aria-label={t('Configure mycological summary')} onClick={() => setSummarySettingsOpen(true)}><Settings2 size={16} /></button></div><p>{formatMycologicalSummary(setLengthStats, setWidthStats, setQStats, setUnit, summarySettings, t('SD n/a'))}</p></div>}
               <div className="set-actions">
                 <button className="text-button" type="button" onClick={() => { const record = activeSet(); void exportProject(record.images, record) }}><Download size={14} />{t('Export set')}</button>
                 <button className="text-button" type="button" title={t('Combined measurement values with source image names; not an image record file')} onClick={() => exportCsv(measurementSetCsv(measurementSet, setUnit), 'mycrometer-set.csv')}>{t('Export set CSV')}</button>
@@ -1880,6 +1849,7 @@ function App() {
         </aside>
       </section>
       {libraryOpen && <ProjectLibrary imageRecords={savedImageRecords} sets={savedSets} activeImageRecordId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredImageRecord} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onDeleteMany={removeProjects} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
+      {summarySettingsOpen && <SummarySettingsDialog settings={summarySettings} onChange={setSummarySettings} onClose={() => setSummarySettingsOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
         {detectionNotice && detectionNotice.imageUrl === imageUrl && <>
           <strong>{t('No object found')}</strong>

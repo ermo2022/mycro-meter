@@ -25,7 +25,7 @@ Browser
   public/sw.js                   Caches the application shell and same-origin assets
 ```
 
-`App.tsx` also contains the box-editing dialog and the summary calculations. The project is small enough that the workspace and its interaction rules currently live together rather than being split into many UI components.
+`App.tsx` also contains the box-editing dialog and workspace interaction rules; `mycologicalSummary.ts` calculates and formats summary statistics.
 
 ## Source Map
 
@@ -109,7 +109,7 @@ The selected reference is prepended to `exportableDetections`, followed by accep
 
 The image canvas is redrawn from current state. It draws the loaded image, saved measurements, and temporary interaction drafts. The user can select a saved box and resize or rotate it; the geometry helpers keep those operations in image coordinates and constrain the result to the image. Accepting a new draft adds it to the list; canceling a draft leaves saved measurements untouched.
 
-The current image summary is calculated in `App.tsx` from box length, width, and Q (length divided by width). A measurement set stores per-image snapshots in React state and IndexedDB and converts their physical values into the selected common unit before computing pooled summaries. Set snapshots include their PNG blobs independently of the current session, so edits or deletion of that session do not change a saved set.
+The current image summary uses box length, width, and Q (length divided by width). Shared presentation preferences choose percentiles or sample SD, extremes, and precision for both image and pooled set summaries without altering measurements or exports. A measurement set stores per-image snapshots in React state and IndexedDB and converts their physical values into the selected common unit before computing pooled summaries. Set snapshots include their PNG blobs independently of the current session, so edits or deletion of that session do not change a saved set.
 
 ### CSV And Persistence
 

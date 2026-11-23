@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Download, FolderOpen, Trash2, X } from 'lucide-react'
 import { cropContainsBounds, imageProcessingSize, type ImageCrop } from './imageResampler'
+import type { SummarySettings } from './mycologicalSummary'
 import { formatStorageBytes, projectStorageBytes, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 
 type Translate = (key: string, values?: Record<string, string | number>) => string
@@ -12,10 +13,44 @@ function Dialog({ title, closeLabel, onClose, children }: { title: string; close
     dialog.showModal()
     return () => dialog.close()
   }, [])
-  return <dialog ref={ref} className="workspace-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }}>
+  return <dialog ref={ref} className="workspace-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }} onKeyDown={(event) => {
+    if (event.key === 'Escape' && !event.defaultPrevented) {
+      event.preventDefault()
+      event.stopPropagation()
+      onClose()
+    }
+  }}>
     <header className="workspace-dialog-header"><h2>{title}</h2><button className="tool-button" type="button" title={closeLabel} aria-label={closeLabel} onClick={onClose}><X size={18} /></button></header>
     {children}
   </dialog>
+}
+
+export function SummarySettingsDialog({ settings, onChange, onClose, t }: {
+  settings: SummarySettings; onChange: (settings: SummarySettings) => void; onClose: () => void; t: Translate
+}) {
+  return <Dialog title={t('Mycological summary settings')} closeLabel={t('Close')} onClose={onClose}>
+    <div className="summary-settings">
+      <label className="detection-field"><span>{t('Statistic')}</span><select value={settings.method} onChange={(event) => {
+        const method = event.target.value
+        if (method === 'p10-p90' || method === 'p05-p95' || method === 'sd1' || method === 'sd2') onChange({ ...settings, method })
+      }}>
+        <option value="p10-p90">{t('10–90 percentiles')}</option>
+        <option value="p05-p95">{t('5–95 percentiles')}</option>
+        <option value="sd1">{t('Mean ± 1 standard deviation')}</option>
+        <option value="sd2">{t('Mean ± 2 standard deviations')}</option>
+      </select></label>
+      <label className="detection-field"><span>{t('Format')}</span><select value={settings.extremes ? 'full' : 'simple'} onChange={(event) => onChange({ ...settings, extremes: event.target.value === 'full' })}>
+        <option value="full">{t('Full (with observed extremes)')}</option>
+        <option value="simple">{t('Simplified (without extremes or N)')}</option>
+      </select></label>
+      <label className="detection-field"><span>{t('Precision')}</span><select value={settings.decimals} onChange={(event) => onChange({ ...settings, decimals: event.target.value === '2' ? 2 : 1 })}>
+        <option value={1}>{t('Up to 1 decimal place')}</option>
+        <option value={2}>{t('Up to 2 decimal places')}</option>
+      </select></label>
+      <p>{t('Applies to image and set summaries. Overview tables and exports are unchanged.')}</p>
+      <button className="button" type="button" onClick={onClose}>{t('Close')}</button>
+    </div>
+  </Dialog>
 }
 
 function Thumbnail({ record }: { record: StoredImageRecord }) {
