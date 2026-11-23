@@ -1,5 +1,5 @@
 import { longAxisFirst, normalizeBoxAngle, type OrientedBox } from './boxGeometry'
-import openCvUrl from '@techstark/opencv-js/dist/opencv.js?url'
+import openCvUrl from '../vendor/opencv.js?url'
 
 export type ObjectPolarity = 'dark' | 'bright'
 export type NoiseFilter = 'gaussian' | 'median' | 'bilateral'

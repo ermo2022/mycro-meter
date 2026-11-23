@@ -115,6 +115,22 @@ Run the geometry, export, image-processing, IndexedDB/ZIP round-trip, locale, an
 
 For a production verification, run `npm run build`, then `npm run preview` and test the app through the preview URL. The development server does not register the service worker. After the first successful preview visit, reload and test offline behavior in the browser.
 
+### Custom OpenCV.js
+
+The app loads the checked-in, single-file `vendor/opencv.js` only when image analysis first needs it. After the first online visit, reload while online so the service worker controls the page, then run detection once to cache OpenCV for offline use. `public/opencv-inventory.json` lists the APIs detected in the TypeScript app and OpenCV-using Node tests and tuning script, and is included in release archives. The production build verifies that the inventory, build recipe, and binary still match. The full `@techstark/opencv-js` package supplies TypeScript declarations; its runtime is not shipped to the browser. OpenCV license notices are in `public/opencv-licenses.txt`.
+
+To rebuild the binary when the inventory or build recipe changes, install Python 3, CMake, Git, and Emscripten 4.0.17, and check out OpenCV at commit `40738fb16ceddb5fb3fea747585f7ce6abb0605b` (tag 5.0.0). Activate Emscripten, then run:
+
+```sh
+export OPENCV_SOURCE=/path/to/opencv
+export OPENCV_BUILD_DIR=/path/to/a/dedicated/opencv-build
+npm run build:opencv
+npm test
+npm run build
+```
+
+Commit both `vendor/opencv.js` and `public/opencv-inventory.json` after rebuilding. Normal builds do not need the OpenCV source or compiler. The inventory scanner follows typed OpenCV values in the app and `cv` variables and their aliases in the Node scripts; use literal property accesses and keep OpenCV parameters named `cv` in those scripts. Dynamic access, destructuring, and casting a typed OpenCV value to `any` or `unknown` are rejected because they could hide required bindings. New bindings must exist in the pinned core/imgproc whitelist or be explicitly classified as handwritten helpers in the build script.
+
 ### Offline Spore Tuning Diagnostics
 
 Extract exported set ZIPs into `measurements/<set-name>/`, preserving each manifest and the item directories containing PNG images and metadata. Accepted boxes are treated as verified single-spore positives regardless of whether they were click-detected, resized, or drawn manually. Unmarked objects are not assumed to be negatives.

@@ -7,7 +7,7 @@ import test from 'node:test'
 import { PNG } from 'pngjs'
 import { analyzeDataset, associateBoxes, boxIou, comparePreprocessing, loadDataset, quantile, reportMarkdown } from '../scripts/tuneSpores.mjs'
 
-const cv = await createRequire(import.meta.url)('@techstark/opencv-js')
+const cv = await createRequire(import.meta.url)('../vendor/opencv.js')
 const box = { centerX: 60.5, centerY: 70.5, width: 48, height: 24, angle: 0 }
 
 test('rotated IoU distinguishes identical, disjoint and differently rotated boxes', () => {
