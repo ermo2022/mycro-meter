@@ -84,6 +84,21 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .set-name-field .tool-button { flex: 0 0 36px; }
 .set-image-open { padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .set-image-open:hover strong { text-decoration: underline; }
+.set-attachments { margin-top: 12px; }
+.set-attachments summary { color: #43524a; font-size: 12px; font-weight: 600; cursor: pointer; }
+.set-attachments summary:focus-visible, .attachment-add:focus-within, .attachment-row a:focus-visible { outline: 2px solid #22826c; outline-offset: 2px; }
+.attachment-content { display: grid; gap: 8px; padding-top: 8px; }
+.attachment-add { width: fit-content; min-height: 36px; display: inline-flex; align-items: center; cursor: pointer; }
+.attachment-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.attachment-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.attachment-detail { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: 11px; }
+.attachment-detail strong { overflow-wrap: anywhere; }
+.attachment-detail small, .attachment-content p { color: #647169; font-size: 11px; }
+.attachment-content p, .attachment-error { margin: 0; line-height: 1.4; }
+.attachment-row a { min-height: 40px; display: inline-flex; align-items: center; flex-shrink: 0; }
+.attachment-row .remove-button { width: 36px; height: 40px; flex: 0 0 36px; }
+.attachment-content .attachment-warning, .attachment-error { color: #8c4b26; font-size: 11px; }
+.attachment-error { margin-top: 8px; }
 .set-actions .text-button { display: inline-flex; align-items: center; gap: 5px; }
 .storage-status { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 10px; color: #53625a; font-size: 11px; overflow-wrap: anywhere; }
 .storage-warning { margin: 6px 0 0; color: #765a2c; font-size: 11px; line-height: 1.45; text-align: center; overflow-wrap: anywhere; }

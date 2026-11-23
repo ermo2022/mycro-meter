@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Download, FolderOpen, Trash2, X } from 'lucide-react'
 import { cropContainsBounds, imageProcessingSize, type ImageCrop } from './imageResampler'
-import { formatStorageBytes, projectStorageBytes, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
+import { formatStorageBytes, projectStorageBytes, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 
 type Translate = (key: string, values?: Record<string, string | number>) => string
 
@@ -105,6 +105,68 @@ export function ProjectLibrary({ imageRecords, sets, activeImageRecordId, active
       {(tab === 'imageRecords' ? !imageRecords.length : !sets.length) && <p className="project-empty">{t('No saved projects')}</p>}
     </div>
   </Dialog>
+}
+
+function AttachmentRow({ attachment, onRemove, t }: { attachment: SetAttachment; onRemove: () => void; t: Translate }) {
+  const [urls, setUrls] = useState<{ download: string; preview?: string } | null>(null)
+  const [error, setError] = useState(false)
+  useEffect(() => {
+    let active = true
+    let download = ''
+    let preview = ''
+    setUrls(null)
+    setError(false)
+    void (async () => {
+      const header = new Uint8Array(await attachment.blob.slice(0, 12).arrayBuffer())
+      const starts = (...bytes: number[]) => bytes.every((byte, index) => header[index] === byte)
+      const ascii = (start: number, end: number) => String.fromCharCode(...header.slice(start, end))
+      const type = starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) ? 'image/png'
+        : starts(0xff, 0xd8, 0xff) ? 'image/jpeg'
+        : ['GIF87a', 'GIF89a'].includes(ascii(0, 6)) ? 'image/gif'
+        : ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP' ? 'image/webp'
+        : ascii(0, 5) === '%PDF-' ? 'application/pdf' : ''
+      if (!active) return
+      download = URL.createObjectURL(new Blob([attachment.blob], { type: 'application/octet-stream' }))
+      if (type) preview = URL.createObjectURL(new Blob([attachment.blob], { type }))
+      setUrls({ download, preview: preview || undefined })
+    })().catch(() => { if (active) setError(true) })
+    return () => {
+      active = false
+      if (download) URL.revokeObjectURL(download)
+      if (preview) URL.revokeObjectURL(preview)
+    }
+  }, [attachment])
+  return <li className="attachment-row">
+    <span className="attachment-detail"><strong>{attachment.name}</strong><small>{formatStorageBytes(attachment.blob.size)}</small></span>
+    {urls?.preview && <a className="text-button" href={urls.preview} target="_blank" rel="noopener noreferrer" aria-label={t('Open {name}', { name: attachment.name })}>{t('Open')}</a>}
+    {urls && <a className="text-button" href={urls.download} download={attachment.name} aria-label={t('Download {name}', { name: attachment.name })}>{t('Download')}</a>}
+    <button className="remove-button" type="button" aria-label={t('Remove {name}', { name: attachment.name })} title={t('Remove {name}', { name: attachment.name })} onClick={onRemove}>×</button>
+    {error && <span role="alert">{t('Could not open attachment.')}</span>}
+  </li>
+}
+
+export function SetAttachments({ attachments, totalBytes, estimate, estimateUnavailable, warning, error, saveError, onAdd, onRemove, t }: {
+  attachments: SetAttachment[]; totalBytes: number; estimate: StorageEstimate | null; estimateUnavailable: boolean
+  warning: string; error: string; saveError: string; onAdd: (files: File[]) => void; onRemove: (id: string) => void; t: Translate
+}) {
+  return <div className="set-attachments">
+    <details>
+      <summary>{t('Attachments ({count})', { count: attachments.length })}</summary>
+      <div className="attachment-content">
+        <label className="button button-small attachment-add">{t('Add files')}<input className="visually-hidden" type="file" multiple onChange={(event) => {
+          const files = Array.from(event.target.files ?? [])
+          event.target.value = ''
+          onAdd(files)
+        }} /></label>
+        {attachments.length > 0 && <ul className="attachment-list">{attachments.map((attachment) => <AttachmentRow key={attachment.id} attachment={attachment} onRemove={() => onRemove(attachment.id)} t={t} />)}</ul>}
+        <p>{t('Set file contents: {size} of 128 MiB; ZIP metadata also counts.', { size: formatStorageBytes(totalBytes) })}</p>
+        {estimateUnavailable ? <p>{t('Browser storage estimate unavailable.')}</p> : estimate?.usage !== undefined && estimate.quota !== undefined && <p>{t('Site storage: approximately {available} available ({used} of {quota} used).', { available: formatStorageBytes(Math.max(0, estimate.quota - estimate.usage)), used: formatStorageBytes(estimate.usage), quota: formatStorageBytes(estimate.quota) })}</p>}
+        {warning && <p className="attachment-warning" role="status">{t(warning)}</p>}
+      </div>
+    </details>
+    {error && <p className="attachment-error" role="alert">{t(error)}</p>}
+    {saveError && <p className="attachment-error" role="alert">{t(saveError)}</p>}
+  </div>
 }
 
 export function ImageProcessingPanel({ image, crop, onCropChange, reduction, onReductionChange, measurementBounds, preserveScale, hasReference, onApply, onClose, t }: {

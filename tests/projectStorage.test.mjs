@@ -253,6 +253,76 @@ test('image record and set ZIP round-trips retain geometry, calibration, PNG and
   }
 })
 
+test('set attachments persist and round-trip with their filenames and bytes, without affecting measurements', async () => {
+  const record = storage.createImageRecord('attachment-image', image, metadata)
+  const attachments = [
+    { id: 'photo', name: 'Fungus in situ.jpg', type: 'image/jpeg', blob: new Blob([new Uint8Array([0xff, 0xd8, 0xff, 1])], { type: 'image/jpeg' }) },
+    { id: 'key', name: 'Key µm.pdf', type: 'application/pdf', blob: new Blob(['%PDF-1.4 example'], { type: 'application/pdf' }) },
+  ]
+  const set = { id: 'attachments-test', name: 'Field notes', unit: 'mm', updatedAt: Date.now(), imageRecordIdsList: [record.id], images: [record], attachments }
+  try {
+    await storage.saveSet(set)
+    const saved = (await storage.listProjects()).sets.find(entry => entry.id === set.id)
+    assert.equal(saved.attachments.length, 2)
+    assert.equal(await saved.attachments[1].blob.text(), '%PDF-1.4 example')
+    assert.equal(saved.images[0].metadata.measurements.length, 1)
+    const withoutAttachments = { ...set, attachments: [] }
+    assert.equal(storage.projectStorageBytes(set) - storage.projectStorageBytes(withoutAttachments),
+      attachments.reduce((total, attachment) => total + attachment.blob.size, 0) +
+      new Blob([JSON.stringify(attachments.map(({ blob, ...fields }) => fields))]).size - 2)
+    const archive = await storage.exportProjectBundle([record], saved)
+    const zip = await JSZip.loadAsync(await archive.arrayBuffer())
+    const manifest = JSON.parse(await zip.file('project_manifest.json').async('string'))
+    assert.equal(manifest.version, 2)
+    assert.deepEqual(manifest.attachments.map(entry => entry.name), attachments.map(entry => entry.name))
+    assert.ok(zip.file('attachments/001-Fungus in situ.jpg'))
+    assert.ok(zip.file('attachments/002-Key µm.pdf'))
+    const restored = await storage.importProjectBundle(archive)
+    assert.deepEqual(restored.set.attachments.map(entry => [entry.name, entry.type]), attachments.map(entry => [entry.name, entry.type]))
+    for (let index = 0; index < attachments.length; index++) {
+      assert.deepEqual(new Uint8Array(await restored.set.attachments[index].blob.arrayBuffer()), new Uint8Array(await attachments[index].blob.arrayBuffer()))
+    }
+    assert.deepEqual(restored.imageRecords[0].metadata, metadata)
+    await storage.saveSet({ ...saved, attachments: [saved.attachments[1]] })
+    assert.deepEqual((await storage.listProjects()).sets.find(entry => entry.id === set.id).attachments.map(entry => entry.name), ['Key µm.pdf'])
+  } finally {
+    await storage.deleteProject(set.id, 'set')
+  }
+})
+
+test('old sets have no attachments and malformed attachment archives or records are rejected', async () => {
+  const record = storage.createImageRecord('legacy-attachment-image', image, metadata)
+  const set = { id: 'legacy-attachment-set', name: 'Legacy', unit: 'mm', updatedAt: Date.now(), imageRecordIdsList: [record.id], images: [record] }
+  try {
+    await storage.saveSet(set)
+    const saved = (await storage.listProjects()).sets.find(entry => entry.id === set.id)
+    assert.deepEqual(saved.attachments, [])
+    const legacy = await storage.exportProjectBundle([record], saved)
+    assert.deepEqual((await storage.importProjectBundle(legacy)).set.attachments, [])
+    const file = { id: 'file', name: 'key.pdf', type: 'application/pdf', blob: new Blob(['%PDF-1.4']) }
+    const archive = await storage.exportProjectBundle([record], { ...saved, attachments: [file] })
+    for (const change of [
+      manifest => { manifest.attachments[0].path = '../key.pdf' },
+      manifest => { manifest.attachments[0].name = '../key.pdf' },
+      manifest => { manifest.attachments[0].path = 'attachments/001-missing.pdf' },
+      manifest => { manifest.version = 1 },
+    ]) {
+      const zip = await JSZip.loadAsync(await archive.arrayBuffer())
+      const manifest = JSON.parse(await zip.file('project_manifest.json').async('string'))
+      change(manifest)
+      zip.file('project_manifest.json', JSON.stringify(manifest))
+      await assert.rejects(storage.importProjectBundle(await zip.generateAsync({ type: 'blob' })), /Invalid|missing/)
+    }
+    await assert.rejects(storage.saveSet({ ...saved, attachments: [file, file] }), /Invalid set attachment/)
+    await assert.rejects(storage.saveSet({ ...saved, attachments: [{ ...file, name: '../key.pdf' }] }), /Invalid set attachment/)
+    await assert.rejects(storage.saveSet({ ...saved, attachments: Array.from({ length: 101 }, (_, index) => ({ ...file, id: String(index) })) }), /Invalid set attachments/)
+    class OversizedBlob extends Blob { get size() { return storage.MAX_PROJECT_BYTES + 1 } }
+    await assert.rejects(storage.saveSet({ ...saved, attachments: [{ ...file, blob: new OversizedBlob() }] }), /Invalid set attachment/)
+  } finally {
+    await storage.deleteProject(set.id, 'set')
+  }
+})
+
 test('offline app-shell lookups tolerate Origin variants on static assets', async () => {
   const handlers = new Map()
   const origin = 'https://mycrometer.example'

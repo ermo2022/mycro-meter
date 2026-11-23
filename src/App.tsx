@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEve
 import * as UTIF from 'utif'
 import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react'
 import { adjustImageCrop, constrainCropToBounds, cropContainsBounds, measurementCropBounds, resampleMicroscopeImage, translateCroppedMeasurements, type CropHandle, type ImageCrop } from './imageResampler'
-import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listCalibrationPresets, listProjects, saveCalibrationPreset, saveImageRecord, saveSet, type CalibrationPreset, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
-import { ImageProcessingPanel, ProjectLibrary } from './WorkspaceDialogs'
+import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listCalibrationPresets, listProjects, MAX_PROJECT_BYTES, MAX_SET_ATTACHMENTS, projectBinaryBytes, saveCalibrationPreset, saveImageRecord, saveSet, validAttachmentName, type CalibrationPreset, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
+import { ImageProcessingPanel, ProjectLibrary, SetAttachments } from './WorkspaceDialogs'
 import { DetectionReviewDialog, type DetectionReviewItem } from './DetectionReviewDialog'
 import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
 import { extractReferenceFeatures, type ReferenceFeatures } from './referenceFeatures'
@@ -283,6 +283,12 @@ function App() {
   const [storageReady, setStorageReady] = useState(false)
   const [storageStatus, setStorageStatus] = useState('')
   const [setSnapshots, setSetSnapshots] = useState<StoredImageRecord[]>([])
+  const [setAttachments, setSetAttachments] = useState<SetAttachment[]>([])
+  const [attachmentError, setAttachmentError] = useState('')
+  const [attachmentQuotaWarning, setAttachmentQuotaWarning] = useState('')
+  const [setSaveError, setSetSaveError] = useState('')
+  const [storageEstimate, setStorageEstimate] = useState<StorageEstimate | null>(null)
+  const [storageEstimateUnavailable, setStorageEstimateUnavailable] = useState(false)
   const [setId, setSetId] = useState<string>(() => crypto.randomUUID())
   const [setName, setSetName] = useState('')
   const [language, setLanguage] = useState<Language>(() => {
@@ -462,11 +468,44 @@ function App() {
 
   useEffect(() => {
     if (!storageReady || !setSnapshots.length) return
-    const record: StoredMeasurementSet = { id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots }
+    let active = true
+    const record: StoredMeasurementSet = { id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots, attachments: setAttachments }
     void saveSet(record).then(() => {
       setSavedSets((current) => [record, ...current.filter((entry) => entry.id !== record.id)])
-    }).catch(() => setStorageStatus('Local save failed. Export a ZIP backup.'))
-  }, [storageReady, setSnapshots, setId, setName, setUnit])
+      if (active) {
+        setSetSaveError('')
+        if (navigator.storage?.estimate) void navigator.storage.estimate().then((estimate) => {
+          if (active) {
+            setStorageEstimate(estimate)
+            setStorageEstimateUnavailable(estimate.usage === undefined || estimate.quota === undefined)
+          }
+        }).catch(() => { if (active) setStorageEstimateUnavailable(true) })
+      }
+    }).catch(() => {
+      if (active) {
+        setSetSaveError('Could not save set locally. Export a ZIP backup.')
+        setStorageStatus('Local save failed. Export a ZIP backup.')
+      }
+    })
+    return () => { active = false }
+  }, [storageReady, setSnapshots, setId, setName, setUnit, setAttachments])
+
+  useEffect(() => {
+    if (!setSnapshots.length) return
+    let active = true
+    if (!navigator.storage?.estimate) {
+      setStorageEstimateUnavailable(true)
+      return
+    }
+    void navigator.storage.estimate().then((estimate) => {
+      if (!active) return
+      setStorageEstimate(estimate)
+      setStorageEstimateUnavailable(estimate.usage === undefined || estimate.quota === undefined)
+    }).catch(() => {
+      if (active) setStorageEstimateUnavailable(true)
+    })
+    return () => { active = false }
+  }, [setId, setSnapshots, setAttachments])
 
   useEffect(() => {
     return () => {
@@ -1089,14 +1128,44 @@ function App() {
       calibration,
       measurements,
     }
+    const record = createImageRecord(imageId, imageBlob, snapshot)
+    const nextSnapshots = setSnapshots.some((entry) => entry.id === imageId)
+      ? setSnapshots.map((entry) => entry.id === imageId ? record : entry)
+      : [...setSnapshots, record]
+    if (projectBinaryBytes(nextSnapshots, setAttachments) > MAX_PROJECT_BYTES) {
+      setAttachmentError('Set files exceed the 128 MiB project limit.')
+      return
+    }
+    setAttachmentError('')
     setMeasurementSet((current) => current.some((image) => image.id === imageId)
       ? current.map((image) => image.id === imageId ? snapshot : image)
       : [...current, snapshot])
-    const record = createImageRecord(imageId, imageBlob, snapshot)
     setSetSnapshots((current) => current.some((entry) => entry.id === imageId)
       ? current.map((entry) => entry.id === imageId ? record : entry)
       : [...current, record])
     setStatus(`${imageName} saved to measurement set`)
+  }
+
+  const addSetAttachments = (files: File[]) => {
+    if (!files.length) return
+    if (files.some((file) => !validAttachmentName(file.name))) {
+      setAttachmentError('An attachment has an invalid filename.')
+      return
+    }
+    if (setAttachments.length + files.length > MAX_SET_ATTACHMENTS) {
+      setAttachmentError('A set can contain at most 100 attachments.')
+      return
+    }
+    const additions: SetAttachment[] = files.map((file) => ({ id: crypto.randomUUID(), name: file.name, type: file.type, blob: file }))
+    if (projectBinaryBytes(setSnapshots, [...setAttachments, ...additions]) > MAX_PROJECT_BYTES) {
+      setAttachmentError('Set files exceed the 128 MiB project limit.')
+      return
+    }
+    setAttachmentError('')
+    const additionalBytes = files.reduce((total, file) => total + file.size, 0)
+    setAttachmentQuotaWarning(storageEstimate?.quota !== undefined && storageEstimate.usage !== undefined && additionalBytes > storageEstimate.quota - storageEstimate.usage
+      ? 'These files may exceed the available browser storage.' : '')
+    setSetAttachments((current) => [...current, ...additions])
   }
 
   const exportRawCsv = () => {
@@ -1181,7 +1250,7 @@ function App() {
     void exportProject([createImageRecord(imageId, imageBlob, { imageName, imageWidth: imageSize.x, imageHeight: imageSize.y, calibration, measurements })])
   }
 
-  const activeSet = (): StoredMeasurementSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots })
+  const activeSet = (): StoredMeasurementSet => ({ id: setId, name: setName.trim() || 'Measurement set', unit: setUnit, updatedAt: Date.now(), imageRecordIdsList: setSnapshots.map((entry) => entry.id), images: setSnapshots, attachments: setAttachments })
 
   const exportActiveProject = () => {
     if (!setSnapshots.length) {
@@ -1202,6 +1271,10 @@ function App() {
     setSetName(record.name)
     setSetUnit(record.unit)
     setSetSnapshots(record.images)
+    setSetAttachments(record.attachments)
+    setAttachmentError('')
+    setAttachmentQuotaWarning('')
+    setSetSaveError('')
     setMeasurementSet(record.images.map((entry) => ({ ...entry.metadata, id: entry.id })) as MeasurementSetImage[])
     if (record.images[0]) openStoredImageRecord(record.images[0])
     else setLibraryOpen(false)
@@ -1238,6 +1311,10 @@ function App() {
     setSetId(crypto.randomUUID())
     setSetName('')
     setSetSnapshots([])
+    setSetAttachments([])
+    setAttachmentError('')
+    setAttachmentQuotaWarning('')
+    setSetSaveError('')
     setMeasurementSet([])
   }
 
@@ -1246,6 +1323,10 @@ function App() {
     setSetName('')
     setSetUnit('µm')
     setSetSnapshots([])
+    setSetAttachments([])
+    setAttachmentError('')
+    setAttachmentQuotaWarning('')
+    setSetSaveError('')
     setMeasurementSet([])
     unloadImage()
   }
@@ -1381,6 +1462,11 @@ function App() {
   const setWidthStats = summarize(setBoxes.map((box) => box.width))
   const setQStats = summarize(setBoxes.map((box) => box.q))
   const setMeasurementCount = measurementSet.reduce((total, image) => total + image.measurements.length, 0)
+  const setFileBytes = projectBinaryBytes(setSnapshots, setAttachments)
+  const attachmentWarning = attachmentQuotaWarning || (setFileBytes >= MAX_PROJECT_BYTES * 0.9
+    ? 'Set files are close to the 128 MiB project limit.'
+    : storageEstimate?.quota && storageEstimate.usage !== undefined && storageEstimate.usage >= storageEstimate.quota * 0.9
+      ? 'Browser storage is nearly full.' : '')
   const currentImageInSet = measurementSet.some((image) => image.id === imageId)
   const cropViewTransform = imageSize && canvasSize.x > 0 && canvasSize.y > 0 ? (() => {
     const scale = Math.max(0.01, Math.min((canvasSize.x - 64) / imageSize.x, (canvasSize.y - 64) / imageSize.y) * zoom)
@@ -1752,6 +1838,7 @@ function App() {
             {calibration && measurements.length > 0 && <button className="button set-save-button" type="button" onClick={saveImageToSet}>
               <span aria-hidden="true">{currentImageInSet ? '↻' : '+'}</span> {t(currentImageInSet ? 'Update image in set' : 'Add image to set')}
             </button>}
+            {!setSnapshots.length && attachmentError && <p className="attachment-error" role="alert">{t(attachmentError)}</p>}
             {measurementSet.length > 0 && <>
               <ul className="set-image-list" aria-label={t('Images in measurement set')}>
                 {measurementSet.map((image) => (
@@ -1761,6 +1848,7 @@ function App() {
                   </li>
                 ))}
               </ul>
+              <SetAttachments attachments={setAttachments} totalBytes={setFileBytes} estimate={storageEstimate} estimateUnavailable={storageEstimateUnavailable} warning={attachmentWarning} error={attachmentError} saveError={setSaveError} onAdd={addSetAttachments} onRemove={(id) => { setSetAttachments((current) => current.filter((entry) => entry.id !== id)); setAttachmentError(''); setAttachmentQuotaWarning('') }} t={t} />
               <label className="detection-field"><span>{t('Set unit')}</span><select value={setUnit} onChange={(event) => setSetUnit(event.target.value as Unit)}>{units.map((unit) => <option key={unit}>{unit}</option>)}</select></label>
               <div className="overview-table" role="table" aria-label={t('Measurement set size and Q summary')}>
                 <div className="overview-row overview-header" role="row"><span role="columnheader">{t('Metric')}</span><span role="columnheader">{t('Mean ± SD')}</span><span role="columnheader">D1–D9</span></div>

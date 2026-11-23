@@ -8,6 +8,12 @@ export type StoredImageRecord = {
   metadata: ImageMeasurementData
   csv: string
 }
+export type SetAttachment = {
+  id: string
+  name: string
+  type: string
+  blob: Blob
+}
 export type StoredMeasurementSet = {
   id: string
   name: string
@@ -15,6 +21,7 @@ export type StoredMeasurementSet = {
   updatedAt: number
   imageRecordIdsList: string[]
   images: StoredImageRecord[]
+  attachments: SetAttachment[]
 }
 
 export type CalibrationPreset = {
@@ -27,7 +34,8 @@ export type CalibrationPreset = {
 const imageRecords = localforage.createInstance({ name: 'mycrometer', storeName: 'image_records_store', driver: localforage.INDEXEDDB })
 const sets = localforage.createInstance({ name: 'mycrometer', storeName: 'sets_store', driver: localforage.INDEXEDDB })
 const calibrationPresets = localforage.createInstance({ name: 'mycrometer', storeName: 'calibration_presets_store', driver: localforage.INDEXEDDB })
-const MAX_PROJECT_BYTES = 128 * 1024 * 1024
+export const MAX_PROJECT_BYTES = 128 * 1024 * 1024
+export const MAX_SET_ATTACHMENTS = 100
 const MAX_PNG_BYTES = 128 * 1024 * 1024
 let writes: Promise<unknown> = Promise.resolve()
 
@@ -56,8 +64,13 @@ export function projectStorageBytes(record: StoredImageRecord | StoredMeasuremen
   const dataBytes = new Blob([JSON.stringify(record, (_key, value: unknown) => value instanceof Blob ? undefined : value)]).size
   const imageBytes = 'imageBlob' in record
     ? record.imageBlob.size
-    : record.images.reduce((total, image) => total + image.imageBlob.size, 0)
+    : projectBinaryBytes(record.images, record.attachments ?? [])
   return dataBytes + imageBytes
+}
+
+export function projectBinaryBytes(images: readonly StoredImageRecord[], attachments: readonly SetAttachment[]): number {
+  return images.reduce((total, image) => total + image.imageBlob.size, 0) +
+    attachments.reduce((total, attachment) => total + attachment.blob.size, 0)
 }
 
 export function formatStorageBytes(bytes: number): string {
@@ -187,19 +200,47 @@ async function normalizeStoredSet(value: unknown): Promise<StoredMeasurementSet>
     if (totalImageBytes > MAX_PROJECT_BYTES) throw new Error('Stored set exceeds the size limit')
     images.push(image)
   }
-  return { ...record, images }
+  const attachments = normalizeAttachments(record.attachments === undefined ? [] : record.attachments)
+  if (projectBinaryBytes(images, attachments) > MAX_PROJECT_BYTES) throw new Error('Stored set exceeds the size limit')
+  return { ...record, images, attachments }
+}
+
+export function validAttachmentName(name: unknown): name is string {
+  return typeof name === 'string' && name.trim().length > 0 && name.length <= 255 &&
+    name !== '.' && name !== '..' && !/[\\/\x00-\x1f\x7f]/.test(name)
+}
+
+function normalizeAttachments(value: unknown): SetAttachment[] {
+  if (!Array.isArray(value) || value.length > MAX_SET_ATTACHMENTS) throw new Error('Invalid set attachments')
+  const ids = new Set<string>()
+  return value.map((entry: unknown) => {
+    if (!entry || typeof entry !== 'object') throw new Error('Invalid set attachment')
+    const attachment = entry as SetAttachment
+    if (typeof attachment.id !== 'string' || !attachment.id || attachment.id.length > 256 || ids.has(attachment.id) ||
+      !validAttachmentName(attachment.name) || typeof attachment.type !== 'string' || attachment.type.length > 255 ||
+      /[^\x20-\x7e]/.test(attachment.type) || !(attachment.blob instanceof Blob) || attachment.blob.size > MAX_PROJECT_BYTES) {
+      throw new Error('Invalid set attachment')
+    }
+    ids.add(attachment.id)
+    return { id: attachment.id, name: attachment.name, type: attachment.type, blob: attachment.blob }
+  })
 }
 
 export async function exportProjectBundle(records: StoredImageRecord[], set?: StoredMeasurementSet): Promise<Blob> {
   if (!records.length || records.length > 100) throw new Error('A project must contain 1 to 100 images')
-  if (records.reduce((total, record) => total + record.imageBlob.size, 0) > MAX_PROJECT_BYTES) throw new Error('Project exceeds the 128 MiB limit')
+  const attachments = normalizeAttachments(set?.attachments ?? [])
+  if (projectBinaryBytes(records, attachments) > MAX_PROJECT_BYTES) throw new Error('Project exceeds the 128 MiB limit')
   const { default: JSZip } = await import('jszip')
   const zip = new JSZip()
   const items = records.map((record, index) => ({ path: `items/item_${String(index + 1).padStart(3, '0')}`, id: record.id }))
+  const attachmentEntries = attachments.map((attachment, index) => ({
+    path: `attachments/${String(index + 1).padStart(3, '0')}-${attachment.name}`,
+    name: attachment.name, type: attachment.type,
+  }))
   zip.file('project_manifest.json', JSON.stringify({
-    format: 'mycrometer', version: 1, kind: set ? 'set' : 'image',
+    format: 'mycrometer', version: attachments.length ? 2 : 1, kind: set ? 'set' : 'image',
     name: set?.name ?? records[0].metadata.imageName,
-    unit: set?.unit ?? null, items,
+    unit: set?.unit ?? null, items, ...(attachments.length ? { attachments: attachmentEntries } : {}),
   }, null, 2))
   for (const [index, record] of records.entries()) {
     validateMetadata(record.metadata)
@@ -211,6 +252,9 @@ export async function exportProjectBundle(records: StoredImageRecord[], set?: St
   }
   if (set) {
     zip.file('measurements.csv', measurementSetCsv(records.map((record) => ({ ...record.metadata, id: record.id })) as MeasurementSetImage[], set.unit))
+    for (const [index, attachment] of attachments.entries()) {
+      zip.file(attachmentEntries[index].path, await attachment.blob.arrayBuffer())
+    }
   }
   const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' })
   if (blob.size > MAX_PROJECT_BYTES) throw new Error('Project exceeds the 128 MiB limit')
@@ -235,10 +279,12 @@ export async function importProjectBundle(file: Blob): Promise<{ imageRecords: S
     return JSON.parse(await entry.async('string'))
   }
   const manifest = await readJson('project_manifest.json')
-  if (!manifest || manifest.format !== 'mycrometer' || manifest.version !== 1 ||
+  if (!manifest || manifest.format !== 'mycrometer' || ![1, 2].includes(manifest.version) ||
     !['image', 'set'].includes(manifest.kind) || typeof manifest.name !== 'string' ||
     !Array.isArray(manifest.items) || !manifest.items.length || manifest.items.length > 100 ||
     (manifest.kind === 'image' && manifest.items.length !== 1) ||
+    (manifest.version === 1 && manifest.attachments !== undefined) ||
+    (manifest.version === 2 && (manifest.kind !== 'set' || !Array.isArray(manifest.attachments) || manifest.attachments.length > MAX_SET_ATTACHMENTS)) ||
     (manifest.kind === 'set' && !units.includes(manifest.unit))) throw new Error('Invalid or unsupported Mycrometer project')
   const records: StoredImageRecord[] = []
   const paths = new Set<string>()
@@ -254,9 +300,22 @@ export async function importProjectBundle(file: Blob): Promise<{ imageRecords: S
     await validatePng(imageBlob, metadata)
     records.push(createImageRecord(crypto.randomUUID(), imageBlob, metadata))
   }
+  const attachments: SetAttachment[] = []
+  if (manifest.version === 2) {
+    for (const [index, item] of manifest.attachments.entries()) {
+      if (!item || !validAttachmentName(item.name) || typeof item.type !== 'string' || item.type.length > 255 ||
+        /[^\x20-\x7e]/.test(item.type) ||
+        item.path !== `attachments/${String(index + 1).padStart(3, '0')}-${item.name}`) throw new Error('Invalid set attachment')
+      const entry = zip.file(item.path)
+      if (!entry || entry.dir) throw new Error('Set attachment is missing')
+      const blob = new Blob([await entry.async('arraybuffer')], { type: item.type })
+      attachments.push({ id: crypto.randomUUID(), name: item.name, type: item.type, blob })
+    }
+  }
+  if (projectBinaryBytes(records, attachments) > MAX_PROJECT_BYTES) throw new Error('Project exceeds the 128 MiB limit')
   const set: StoredMeasurementSet | undefined = manifest.kind === 'set' ? {
     id: crypto.randomUUID(), name: manifest.name, unit: manifest.unit, updatedAt: Date.now(),
-    imageRecordIdsList: records.map((record) => record.id), images: records,
+    imageRecordIdsList: records.map((record) => record.id), images: records, attachments,
   } : undefined
   return { imageRecords: records, set }
 }
