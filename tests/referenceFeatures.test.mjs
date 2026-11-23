@@ -5,7 +5,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
-const cv = await require('@techstark/opencv-js')
+const cv = await require('../vendor/opencv.js')
 let imageSource
 let imageRect
 const browserCv = new Proxy(cv, {

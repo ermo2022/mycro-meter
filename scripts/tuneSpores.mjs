@@ -237,7 +237,7 @@ function stageObserver(cv, targets, scale) {
 }
 
 export async function analyzeDataset(sets, { baseline = true, stages = false, preprocessing = {}, progress = () => {} } = {}) {
-  const cv = await require('@techstark/opencv-js')
+  const cv = await require('../vendor/opencv.js')
   const images = []
   for (const set of sets) {
     for (const item of set.items) {
@@ -421,7 +421,7 @@ export const PREPROCESSING_VARIANTS = [
 ]
 
 export async function comparePreprocessing(sets, { stages = false, progress = () => {} } = {}) {
-  const cv = await require('@techstark/opencv-js')
+  const cv = await require('../vendor/opencv.js')
   const variants = []
   let baseline
   for (const variant of PREPROCESSING_VARIANTS) {
@@ -486,7 +486,7 @@ export function comparisonMarkdown(variants) {
 }
 
 async function writeReviewSheets(sets, variants, output) {
-  const cv = await require('@techstark/opencv-js')
+  const cv = await require('../vendor/opencv.js')
   const items = new Map(sets.flatMap(set => set.items).map(item => [item.path, item]))
   for (const variant of variants) {
     for (const image of variant.changes.filter(image => image.additions.length)) {

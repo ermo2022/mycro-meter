@@ -5,7 +5,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
-const cv = await require('@techstark/opencv-js')
+const cv = await require('../vendor/opencv.js')
 
 const source = readFileSync(new URL('../src/sporeMatching.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, {
