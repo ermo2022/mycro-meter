@@ -176,3 +176,17 @@ test('box editor deletion removes only the saved measurement and is unavailable 
   assert.ok(editorDeclaration.getText(source).includes("onClick={onClose}>{t('Cancel')}"))
   assert.ok(editorDeclaration.getText(source).includes("onClick={onAccept}"))
 })
+
+test('touch box handles retain usable screen sizes as the canvas changes size', () => {
+  const definition = source.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'boxEditorHandleMetrics')
+  assert.ok(definition)
+  const { outputText } = ts.transpileModule(definition.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } })
+  const metrics = new Function(`${outputText}; return boxEditorHandleMetrics`)()
+  for (const width of [280, 500, 800]) {
+    const result = metrics(960, width, true)
+    for (const [actual, expected] of [[result.resizeSize, 16], [result.rotateRadius, 10], [result.hitRadius, 22], [result.rotationOffset, 32]]) {
+      assert.ok(Math.abs(actual * width / 960 - expected) < 1e-9)
+    }
+  }
+  assert.deepEqual(metrics(960, 800, false), { resizeSize: 14, rotateRadius: 8, hitRadius: 26, rotationOffset: 28, viewportInset: 32, strokeWidth: 1.5 })
+})

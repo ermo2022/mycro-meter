@@ -2235,6 +2235,12 @@ type BoxEditorDialogProps = {
   onClose: () => void
 }
 
+function boxEditorHandleMetrics(canvasWidth: number, displayWidth: number, touchLayout: boolean) {
+  if (!touchLayout || displayWidth <= 0) return { resizeSize: 14, rotateRadius: 8, hitRadius: 26, rotationOffset: 28, viewportInset: 32, strokeWidth: 1.5 }
+  const scale = canvasWidth / displayWidth
+  return { resizeSize: 16 * scale, rotateRadius: 10 * scale, hitRadius: 22 * scale, rotationOffset: 32 * scale, viewportInset: 44 * scale, strokeWidth: 1.5 * scale }
+}
+
 function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pixelsPerUnit, onChange, translate: t, onAccept, onDelete, onClose }: BoxEditorDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -2253,6 +2259,14 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
   onCloseRef.current = onClose
 
   useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const observer = new ResizeObserver(() => setViewVersion((version) => version + 1))
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
     closeButtonRef.current?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onCloseRef.current()
@@ -2267,6 +2281,7 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     if (!canvas || !context) return
     canvas.width = canvasWidth
     canvas.height = canvasHeight
+    const handles = boxEditorHandleMetrics(canvasWidth, canvas.getBoundingClientRect().width, window.matchMedia('(max-width: 860px), (pointer: coarse)').matches)
     context.fillStyle = '#17221e'
     context.fillRect(0, 0, canvasWidth, canvasHeight)
     context.imageSmoothingEnabled = true
@@ -2281,7 +2296,8 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
       const cropHeight = Math.min(imageSize.y, Math.max(1, bounds.height + paddingY * 2))
       const cropX = clamp(bounds.x + bounds.width / 2 - cropWidth / 2, 0, imageSize.x - cropWidth)
       const cropY = clamp(bounds.y + bounds.height / 2 - cropHeight / 2, 0, imageSize.y - cropHeight)
-      const scale = Math.min((canvasWidth - 64) / cropWidth, (canvasHeight - 64) / cropHeight)
+      const inset = Math.min(handles.viewportInset, (canvasHeight - 1) / 2)
+      const scale = Math.min((canvasWidth - inset * 2) / cropWidth, (canvasHeight - inset * 2) / cropHeight)
       const offsetX = (canvasWidth - cropWidth * scale) / 2
       const offsetY = (canvasHeight - cropHeight * scale) / 2
       transform = { cropX, cropY, cropWidth, cropHeight, scale, offsetX, offsetY }
@@ -2308,7 +2324,7 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     })
     const corners = boxCorners(editor.rect).map(toCanvas)
     const north = toCanvas(boxHandles(editor.rect, 0).find((handle) => handle.handle === 'n')!)
-    const rotationHandle = toCanvas(boxHandles(editor.rect, 28 / scale).find((handle) => handle.handle === 'rotate')!)
+    const rotationHandle = toCanvas(boxHandles(editor.rect, handles.rotationOffset / scale).find((handle) => handle.handle === 'rotate')!)
     context.strokeStyle = '#ef6248'
     context.lineWidth = 2
     context.beginPath()
@@ -2320,23 +2336,23 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     context.moveTo(north.x, north.y)
     context.lineTo(rotationHandle.x, rotationHandle.y)
     context.stroke()
-    boxHandles(editor.rect, 28 / scale).forEach(({ handle, ...sourceHandle }) => {
+    boxHandles(editor.rect, handles.rotationOffset / scale).forEach(({ handle, ...sourceHandle }) => {
       const { x, y } = toCanvas(sourceHandle)
       if (handle === 'rotate') {
         context.beginPath()
         context.fillStyle = '#d7f06a'
         context.strokeStyle = '#536a35'
-        context.lineWidth = 1.5
-        context.arc(x, y, 8, 0, Math.PI * 2)
+        context.lineWidth = handles.strokeWidth
+        context.arc(x, y, handles.rotateRadius, 0, Math.PI * 2)
         context.fill()
         context.stroke()
         return
       }
       context.fillStyle = '#fffdf1'
-      context.fillRect(x - 7, y - 7, 14, 14)
+      context.fillRect(x - handles.resizeSize / 2, y - handles.resizeSize / 2, handles.resizeSize, handles.resizeSize)
       context.strokeStyle = '#b43c2b'
-      context.lineWidth = 1.5
-      context.strokeRect(x - 7, y - 7, 14, 14)
+      context.lineWidth = handles.strokeWidth
+      context.strokeRect(x - handles.resizeSize / 2, y - handles.resizeSize / 2, handles.resizeSize, handles.resizeSize)
     })
   }, [canvasHeight, canvasWidth, editor, image, imageSize, viewVersion])
 
@@ -2407,7 +2423,8 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
         return
       }
     }
-    const handles = boxHandles(editor.rect, 28 / transform.scale).map(({ handle, x, y }) => ({
+    const metrics = boxEditorHandleMetrics(canvasWidth, event.currentTarget.getBoundingClientRect().width, window.matchMedia('(max-width: 860px), (pointer: coarse)').matches)
+    const handles = boxHandles(editor.rect, metrics.rotationOffset / transform.scale).map(({ handle, x, y }) => ({
       handle,
       x: transform.offsetX + (x - transform.cropX) * transform.scale,
       y: transform.offsetY + (y - transform.cropY) * transform.scale,
@@ -2415,7 +2432,7 @@ function BoxEditorDialog({ image, imageSize, editor, reference = false, unit, pi
     const nearest = handles
       .map((handle) => ({ ...handle, distance: Math.hypot(handle.x - point.x, handle.y - point.y) }))
       .sort((a, b) => a.distance - b.distance)[0]
-    if (!nearest || nearest.distance > 26) {
+    if (!nearest || nearest.distance > metrics.hitRadius) {
       panRef.current = { pointerId: event.pointerId, point }
       event.currentTarget.setPointerCapture(event.pointerId)
       return
