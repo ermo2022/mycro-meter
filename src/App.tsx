@@ -1345,7 +1345,6 @@ function App() {
       : boxFromRegion(regionBetween(measurement.start, measurement.end))
     const objectId = measurement.kind === 'box' ? measurement.objectId : `manual-${measurement.id}`
     setSelectingReference(false)
-    setTool('select')
     setBoxEditor({ objectId, measurementId: measurement.id, rect })
   }
 
@@ -1365,7 +1364,6 @@ function App() {
       setSporeReference({ rect, features: null, matches: null })
       setSelectingReference(false)
       setBoxEditor(null)
-      setTool('measure')
       setStatus('Analysing reference spore…')
       return
     }
@@ -1385,7 +1383,6 @@ function App() {
     setBoxEditor(null)
     const pixelsPerUnit = calibration?.pixelsPerUnit ?? 1
     const unit = calibration?.unit ?? 'px'
-    setTool(boxEditor.measurementId === null && boxEditor.objectId.startsWith('clicked-') ? 'measure' : 'select')
     setStatus(`Box accepted · ${formatLength(rect.width / pixelsPerUnit)} × ${formatLength(rect.height / pixelsPerUnit)} ${unit}`)
   }
 
