@@ -7,6 +7,8 @@ import { MAX_IMAGE_RECORD_IMAGE_PIXELS } from './measurementCsv'
 
 type Translate = (key: string, values?: Record<string, string | number>) => string
 
+type ImageCaptureConstructor = new (track: MediaStreamTrack) => { takePhoto: () => Promise<Blob> }
+
 function Dialog({ title, closeLabel, onClose, children, className = '' }: { title: string; closeLabel: string; onClose: () => void; children: ReactNode; className?: string }) {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
@@ -63,6 +65,8 @@ export function CameraDialog({ onClose, onCapture, t }: {
         const track = next.getVideoTracks()[0]
         track?.addEventListener('ended', () => {
           if (active) {
+            captureEpoch.current += 1
+            setCapturing(false)
             setReady(false)
             setError('Camera disconnected or access was stopped.')
           }
@@ -100,6 +104,29 @@ export function CameraDialog({ onClose, onCapture, t }: {
   const capture = () => {
     const video = videoRef.current
     if (!video || !ready || capturing) return
+    const epoch = captureEpoch.current
+    const stream = video.srcObject
+    const track = stream instanceof MediaStream ? stream.getVideoTracks()[0] : undefined
+    const ImageCapture = (window as Window & { ImageCapture?: ImageCaptureConstructor }).ImageCapture
+    if (ImageCapture && typeof ImageCapture.prototype.takePhoto === 'function' && track?.readyState === 'live') {
+      setCapturing(true)
+      setError('')
+      try {
+        new ImageCapture(track).takePhoto().then((blob) => {
+          if (epoch !== captureEpoch.current) return
+          setCapturing(false)
+          onCapture(blob)
+        }, () => {
+          if (epoch !== captureEpoch.current) return
+          setCapturing(false)
+          setError('Could not take a camera photo. Please try again.')
+        })
+      } catch {
+        setCapturing(false)
+        setError('Could not take a camera photo. Please try again.')
+      }
+      return
+    }
     const { videoWidth: width, videoHeight: height } = video
     if (!width || !height || width * height > MAX_IMAGE_RECORD_IMAGE_PIXELS) {
       setError('Camera frame dimensions are invalid or exceed 40 megapixels.')
@@ -113,7 +140,6 @@ export function CameraDialog({ onClose, onCapture, t }: {
       setError('Could not capture the camera frame.')
       return
     }
-    const epoch = captureEpoch.current
     try {
       context.drawImage(video, 0, 0, width, height)
       setCapturing(true)
