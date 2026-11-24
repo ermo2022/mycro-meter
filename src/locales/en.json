@@ -129,7 +129,6 @@
     "Could not list cameras. The current camera can still be used.": "Could not list cameras. The current camera can still be used.",
     "Camera frame dimensions are invalid or exceed 40 megapixels.": "Camera frame dimensions are invalid or exceed 40 megapixels.",
     "Could not capture the camera frame.": "Could not capture the camera frame.",
-    "Could not take a camera photo. Please try again.": "Could not take a camera photo. Please try again.",
     "Unload image and clear its measurements": "Unload image and clear its measurements",
     "Unload": "Unload",
     "Tools": "Tools",

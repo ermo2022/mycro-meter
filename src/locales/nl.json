@@ -129,7 +129,6 @@
     "Could not list cameras. The current camera can still be used.": "De cameralijst kon niet worden opgehaald. De huidige camera kan nog worden gebruikt.",
     "Camera frame dimensions are invalid or exceed 40 megapixels.": "De afmetingen van het camerabeeld zijn ongeldig of groter dan 40 megapixels.",
     "Could not capture the camera frame.": "Het camerabeeld kon niet worden vastgelegd.",
-    "Could not take a camera photo. Please try again.": "De camerafoto kon niet worden gemaakt. Probeer het opnieuw.",
     "Unload image and clear its measurements": "Afbeelding en meting sluiten",
     "Unload": "Sluiten",
     "Tools": "Gereedschappen",
