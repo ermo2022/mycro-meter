@@ -6,7 +6,7 @@ import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjec
 import { ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
 import { formatDeciles, formatMycologicalSummary, formatSummary, summarize, type SummaryMethod, type SummarySettings } from './mycologicalSummary'
 import { DetectionReviewDialog, type DetectionReviewItem } from './DetectionReviewDialog'
-import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
+import { createDetectionPreview, detectCircularImage, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
 import { extractReferenceFeatures, type ReferenceFeatures } from './referenceFeatures'
 import { boxIntersectionOverUnion, DEFAULT_MATCHING_SETTINGS, findMatchingSpores, type MatchingSettings, type SporeMatchResult } from './sporeMatching'
 import { boxBounds, boxContainsPoint, boxCorners, boxHandles, constrainBoxToImage, longAxisFirst, normalizeOrientedBox, resizeOrientedBox, rotateOrientedBox, type BoxHandle, type OrientedBox } from './boxGeometry'
@@ -213,6 +213,8 @@ function App() {
   const lastDetectionPointRef = useRef<Point | null>(null)
   const previewButtonRef = useRef<HTMLButtonElement>(null)
   const imageLoadEpochRef = useRef(0)
+  const pendingAutoCropRef = useRef<{ crop: ImageCrop; epoch: number } | null>(null)
+  const autoCircularCropAppliedRef = useRef(false)
   const [imageBlob, setImageBlob] = useState<Blob | null>(null)
   const [savedImageRecords, setSavedImageRecords] = useState<StoredImageRecord[]>([])
   const [savedSets, setSavedSets] = useState<StoredMeasurementSet[]>([])
@@ -483,6 +485,15 @@ function App() {
   }, [detectionNotice])
 
   useEffect(() => {
+    if (!pendingAutoCropRef.current || !imageSize || imageLoadEpochRef.current !== pendingAutoCropRef.current.epoch) return
+    const { crop } = pendingAutoCropRef.current
+    pendingAutoCropRef.current = null
+    if (imageRef.current) {
+      processImage(crop, 1)
+    }
+  }, [imageSize])
+
+  useEffect(() => {
     const canvas = canvasRef.current
     const view = viewRef.current
     const image = imageRef.current
@@ -623,7 +634,6 @@ function App() {
     const epoch = ++imageLoadEpochRef.current
     const image = new Image()
     image.onload = async () => {
-      if (epoch !== imageLoadEpochRef.current) { URL.revokeObjectURL(url); return }
       if (image.naturalWidth <= 0 || image.naturalHeight <= 0 || image.naturalWidth * image.naturalHeight > MAX_IMAGE_RECORD_IMAGE_PIXELS) {
         URL.revokeObjectURL(url)
         setStatus('Image dimensions are invalid or exceed 40 megapixels')
@@ -638,9 +648,29 @@ function App() {
         return
       }
       if (epoch !== imageLoadEpochRef.current) { URL.revokeObjectURL(url); return }
+
+      let detectedCircle: { centerX: number; centerY: number; radius: number; confidence: number } | null = null
+      if (!imageRecord && !autoCircularCropAppliedRef.current) {
+        try {
+          const circleResult = await detectCircularImage(image)
+          if (epoch !== imageLoadEpochRef.current) { URL.revokeObjectURL(url); return }
+          if (circleResult.found && circleResult.centerX !== undefined && circleResult.centerY !== undefined && circleResult.radius !== undefined && circleResult.confidence !== undefined && circleResult.confidence > 0.75) {
+            detectedCircle = {
+              centerX: circleResult.centerX,
+              centerY: circleResult.centerY,
+              radius: circleResult.radius,
+              confidence: circleResult.confidence,
+            }
+          }
+        } catch (error) {
+          // Silently ignore detection errors - proceed without auto-crop
+        }
+      }
+
       detectionEpochRef.current += 1
       measurementGestureRef.current = null
       imageRef.current = image
+      autoCircularCropAppliedRef.current = false
       setImageSize({ x: image.naturalWidth, y: image.naturalHeight })
       setImageUrl(url)
       lastDetectionPointRef.current = null
@@ -665,12 +695,26 @@ function App() {
       setManualDraft(null)
       setZoom(1)
       setPan({ x: 0, y: 0 })
-      if (!imageRecord) {
-        setStatus('Calibration required · click two points on a known scale bar')
-      } else if (imageRecord.imageWidth === image.naturalWidth && imageRecord.imageHeight === image.naturalHeight) {
-        applyImageRecord(imageRecord, preserveDetectionSettings)
+
+      if (detectedCircle) {
+        const padding = Math.max(10, Math.round(detectedCircle.radius * 0.05))
+        const x = Math.max(0, Math.round(detectedCircle.centerX - detectedCircle.radius - padding))
+        const y = Math.max(0, Math.round(detectedCircle.centerY - detectedCircle.radius - padding))
+        const size = Math.round(detectedCircle.radius * 2 + padding * 2)
+        const width = Math.min(image.naturalWidth - x, size)
+        const height = Math.min(image.naturalHeight - y, size)
+        setCrop({ x, y, width, height })
+        setStatus(`Circular image auto-cropped (confidence: ${(detectedCircle.confidence * 100).toFixed(0)}%) · calibration required`)
+        autoCircularCropAppliedRef.current = true
+        pendingAutoCropRef.current = { crop: { x, y, width, height }, epoch }
       } else {
-        setStatus(`Image is ${image.naturalWidth} × ${image.naturalHeight} px, image record expects ${imageRecord.imageWidth} × ${imageRecord.imageHeight} px · open ${imageRecord.imageName}`)
+        if (!imageRecord) {
+          setStatus('Calibration required · click two points on a known scale bar')
+        } else if (imageRecord.imageWidth === image.naturalWidth && imageRecord.imageHeight === image.naturalHeight) {
+          applyImageRecord(imageRecord, preserveDetectionSettings)
+        } else {
+          setStatus(`Image is ${image.naturalWidth} × ${image.naturalHeight} px, image record expects ${imageRecord.imageWidth} × ${imageRecord.imageHeight} px · open ${imageRecord.imageName}`)
+        }
       }
     }
     image.onerror = () => {
