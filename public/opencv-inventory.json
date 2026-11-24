@@ -60,6 +60,7 @@
     "matFromArray",
     "medianBlur",
     "minAreaRect",
+    "minEnclosingCircle",
     "moments",
     "morphologyEx",
     "onRuntimeInitialized",
@@ -71,6 +72,6 @@
     "warpAffine",
     "watershed"
   ],
-  "buildFingerprint": "8f912b4e9933d5842b592637d69e20b2c3c61a9f6188cd113c35a13649de0dd3",
-  "binarySha256": "fe6314ea937167c042e33d1323ff7a333526df391f0da62ab28a04c93b27e694"
+  "buildFingerprint": "ab3f155cdb43eb09accae980f626f059e53ab910a4f6308474ca72db3ca586f7",
+  "binarySha256": "ebd348a7e8c57482f422d8badfa6e36ed93d9889b074b1ba00ef837de5effc5b"
 }

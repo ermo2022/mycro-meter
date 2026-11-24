@@ -411,3 +411,107 @@ function contourBox(cv: OpenCvApi, contour: InstanceType<OpenCvApi['Mat']>): Ori
     angle: normalizeBoxAngle(Math.atan2(widthAxis.offsetY, widthAxis.offsetX) * 180 / Math.PI),
   })
 }
+
+export type CircularDetectionResult = {
+  found: boolean
+  centerX?: number
+  centerY?: number
+  radius?: number
+  confidence?: number
+}
+
+export async function detectCircularImage(image: HTMLImageElement): Promise<CircularDetectionResult> {
+  const cv = await loadOpenCv()
+
+  const resizeFactor = Math.min(1, 800 / Math.max(image.naturalWidth, image.naturalHeight))
+  const processingCanvas = document.createElement('canvas')
+  processingCanvas.width = Math.max(1, Math.round(image.naturalWidth * resizeFactor))
+  processingCanvas.height = Math.max(1, Math.round(image.naturalHeight * resizeFactor))
+
+  const context = processingCanvas.getContext('2d', { willReadFrequently: true })
+  if (!context) throw new Error('Canvas is unavailable')
+  context.drawImage(image, 0, 0, processingCanvas.width, processingCanvas.height)
+
+  const source = cv.imread(processingCanvas)
+  const gray = new cv.Mat()
+  const blurred = new cv.Mat()
+  const edges = new cv.Mat()
+  const contours = new cv.MatVector()
+  const hierarchy = new cv.Mat()
+
+  let bestCircle: CircularDetectionResult = { found: false }
+
+  try {
+    cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY)
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 1.5)
+
+    cv.threshold(blurred, edges, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+
+    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+
+    if (contours.size() === 0) {
+      return { found: false }
+    }
+
+    let maxConfidence = 0
+
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i)
+      const area = cv.contourArea(contour)
+
+      const minSize = Math.pow(30, 2)
+      const maxSize = (processingCanvas.width * processingCanvas.height) * 0.9
+
+      if (area < minSize || area > maxSize) {
+        contour.delete()
+        continue
+      }
+
+      const circle = cv.minEnclosingCircle(contour)
+      const rect = cv.minAreaRect(contour)
+
+      const circleRadius = circle.radius
+      const circleArea = Math.PI * circleRadius * circleRadius
+
+      // Require minimum radius (20% of image size) to filter out noise
+      const minRadius = Math.min(processingCanvas.width, processingCanvas.height) * 0.2
+      if (circleRadius < minRadius) {
+        contour.delete()
+        continue
+      }
+
+      if (circleArea > 0) {
+        const circularity = area / circleArea
+        const circularityScore = Math.min(circularity, 1 / circularity)
+
+        const aspectRatio = Math.max(rect.size.width, rect.size.height) /
+                           Math.min(rect.size.width, rect.size.height)
+        const aspectRatioScore = Math.min(1, 2 / aspectRatio)
+
+        const confidence = (circularityScore * 0.7 + aspectRatioScore * 0.3)
+
+        if (confidence > maxConfidence) {
+          maxConfidence = confidence
+          bestCircle = {
+            found: true,
+            centerX: circle.center.x / resizeFactor,
+            centerY: circle.center.y / resizeFactor,
+            radius: circle.radius / resizeFactor,
+            confidence,
+          }
+        }
+      }
+
+      contour.delete()
+    }
+
+    return bestCircle
+  } finally {
+    source.delete()
+    gray.delete()
+    blurred.delete()
+    edges.delete()
+    contours.delete()
+    hierarchy.delete()
+  }
+}

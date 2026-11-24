@@ -1,7 +1,10 @@
+#folders
+dist/
+extern/
+measurements/
 node_modules/
 sample-images/
-measurements/
-dist/
 tuning-results/
+#files
 *.local
 .DS_Store
