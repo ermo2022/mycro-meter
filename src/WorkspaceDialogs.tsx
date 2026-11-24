@@ -1,20 +1,19 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Camera, Download, FolderOpen, Trash2, X } from 'lucide-react'
+import { Download, FolderOpen, Trash2, X } from 'lucide-react'
 import { cropContainsBounds, imageProcessingSize, type ImageCrop } from './imageResampler'
 import type { SummarySettings } from './mycologicalSummary'
 import { formatStorageBytes, projectStorageBytes, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
-import { MAX_IMAGE_RECORD_IMAGE_PIXELS } from './measurementCsv'
 
 type Translate = (key: string, values?: Record<string, string | number>) => string
 
-function Dialog({ title, closeLabel, onClose, children, className = '' }: { title: string; closeLabel: string; onClose: () => void; children: ReactNode; className?: string }) {
+function Dialog({ title, closeLabel, onClose, children }: { title: string; closeLabel: string; onClose: () => void; children: ReactNode }) {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const dialog = ref.current!
     dialog.showModal()
     return () => dialog.close()
   }, [])
-  return <dialog ref={ref} className={`workspace-dialog ${className}`} aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }} onKeyDown={(event) => {
+  return <dialog ref={ref} className="workspace-dialog" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }} onKeyDown={(event) => {
     if (event.key === 'Escape' && !event.defaultPrevented) {
       event.preventDefault()
       event.stopPropagation()
@@ -24,131 +23,6 @@ function Dialog({ title, closeLabel, onClose, children, className = '' }: { titl
     <header className="workspace-dialog-header"><h2>{title}</h2><button className="tool-button" type="button" title={closeLabel} aria-label={closeLabel} onClick={onClose}><X size={18} /></button></header>
     {children}
   </dialog>
-}
-
-export function CameraDialog({ onClose, onCapture, t }: {
-  onClose: () => void; onCapture: (blob: Blob) => void; t: Translate
-}) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const [deviceId, setDeviceId] = useState('')
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
-  const [ready, setReady] = useState(false)
-  const [capturing, setCapturing] = useState(false)
-  const [error, setError] = useState('')
-  const captureEpoch = useRef(0)
-
-  useEffect(() => {
-    let active = true
-    let stream: MediaStream | undefined
-    const video = videoRef.current
-    setReady(false)
-    setError('')
-    captureEpoch.current += 1
-    setCapturing(false)
-    const start = async () => {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setError('Camera access is unavailable. Use HTTPS or localhost and a supported browser.')
-        return
-      }
-      try {
-        const next = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } },
-        })
-        if (!active) {
-          next.getTracks().forEach((track) => track.stop())
-          return
-        }
-        stream = next
-        const track = next.getVideoTracks()[0]
-        track?.addEventListener('ended', () => {
-          if (active) {
-            setReady(false)
-            setError('Camera disconnected or access was stopped.')
-          }
-        })
-        if (video) {
-          video.srcObject = next
-          await video.play()
-        }
-        if (!active) return
-        try {
-          const available = await navigator.mediaDevices.enumerateDevices()
-          if (active) setDevices(available.filter((device) => device.kind === 'videoinput'))
-        } catch {
-          if (active) setError('Could not list cameras. The current camera can still be used.')
-        }
-      } catch (reason) {
-        if (active) {
-          stream?.getTracks().forEach((track) => track.stop())
-          setReady(false)
-          setError(reason instanceof DOMException && reason.name === 'NotAllowedError'
-            ? 'Camera permission denied. Allow camera access in your browser settings.'
-            : 'Could not start the camera. Check that it is connected and available.')
-        }
-      }
-    }
-    void start()
-    return () => {
-      active = false
-      captureEpoch.current += 1
-      stream?.getTracks().forEach((track) => track.stop())
-      if (video) video.srcObject = null
-    }
-  }, [deviceId])
-
-  const capture = () => {
-    const video = videoRef.current
-    if (!video || !ready || capturing) return
-    const { videoWidth: width, videoHeight: height } = video
-    if (!width || !height || width * height > MAX_IMAGE_RECORD_IMAGE_PIXELS) {
-      setError('Camera frame dimensions are invalid or exceed 40 megapixels.')
-      return
-    }
-    const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
-    const context = canvas.getContext('2d')
-    if (!context) {
-      setError('Could not capture the camera frame.')
-      return
-    }
-    const epoch = captureEpoch.current
-    try {
-      context.drawImage(video, 0, 0, width, height)
-      setCapturing(true)
-      canvas.toBlob((blob) => {
-        if (epoch !== captureEpoch.current) return
-        setCapturing(false)
-        if (!blob) {
-          setError('Could not capture the camera frame.')
-          return
-        }
-        onCapture(blob)
-      }, 'image/png')
-    } catch {
-      setCapturing(false)
-      setError('Could not capture the camera frame.')
-    }
-  }
-
-  return <Dialog title={t('Camera')} closeLabel={t('Close')} onClose={onClose} className="camera-dialog">
-    <div className="camera-dialog-content">
-      <button className="camera-preview-button" type="button" aria-label={t('Take snapshot from live camera view')} disabled={!ready || capturing} onClick={capture}>
-        <video ref={videoRef} className="camera-preview" autoPlay muted playsInline onCanPlay={(event) => {
-          const video = event.currentTarget
-          if (video.srcObject instanceof MediaStream && video.srcObject.getVideoTracks().some((track) => track.readyState === 'live') && video.videoWidth && video.videoHeight) setReady(true)
-        }} />
-      </button>
-      <p className="camera-hint">{t('Tap the live view to take a snapshot.')}</p>
-      {devices.length > 1 && <label className="detection-field camera-selector"><span>{t('Camera')}</span><Camera className="camera-selector-icon" size={20} aria-hidden="true" /><select aria-label={t('Camera')} value={deviceId} onChange={(event) => setDeviceId(event.target.value)}>
-        <option value="">{t('Preferred rear camera')}</option>
-        {devices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || t('Camera {number}', { number: index + 1 })}</option>)}
-      </select></label>}
-      {error && <p role="alert">{t(error)}</p>}
-      <button className="button button-primary" type="button" disabled={!ready || capturing} onClick={capture}>{t('Take snapshot')}</button>
-    </div>
-  </Dialog>
 }
 
 export function SummarySettingsDialog({ settings, onChange, onClose, t }: {

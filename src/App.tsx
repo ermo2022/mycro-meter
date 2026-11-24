@@ -3,7 +3,7 @@ import * as UTIF from 'utif'
 import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Settings2, Trash2, X } from 'lucide-react'
 import { adjustImageCrop, constrainCropToBounds, cropContainsBounds, measurementCropBounds, resampleMicroscopeImage, translateCroppedMeasurements, type CropHandle, type ImageCrop } from './imageResampler'
 import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listCalibrationPresets, listProjects, MAX_PROJECT_BYTES, MAX_SET_ATTACHMENTS, projectBinaryBytes, saveCalibrationPreset, saveImageRecord, saveSet, validAttachmentName, type CalibrationPreset, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
-import { CameraDialog, ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
+import { ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
 import { formatDeciles, formatMycologicalSummary, formatSummary, summarize, type SummaryMethod, type SummarySettings } from './mycologicalSummary'
 import { DetectionReviewDialog, type DetectionReviewItem } from './DetectionReviewDialog'
 import { createDetectionPreview, detectClickedObject, loadOpenCv, type DetectionPreview, type DetectionRegion, type NoiseFilter } from './objectDetection'
@@ -222,7 +222,6 @@ function App() {
   const [calibrationPresetBusy, setCalibrationPresetBusy] = useState(false)
   const [calibrationPresetError, setCalibrationPresetError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
-  const [cameraOpen, setCameraOpen] = useState(false)
   const [summarySettingsOpen, setSummarySettingsOpen] = useState(false)
   const [summarySettings, setSummarySettings] = useState<SummarySettings>(() => {
     const method = window.localStorage.getItem('mycrometer-summary-method')
@@ -1490,7 +1489,6 @@ function App() {
           <button className="button button-quiet" type="button" title={t('Import ZIP project or image record CSV')} onClick={() => importInputRef.current?.click()}>{t('Import project')}</button>
           <input ref={importInputRef} className="visually-hidden" type="file" accept=".zip,.myproj,.csv,application/zip,text/csv,image/*" multiple onChange={handleImport} />
           <button className="button button-quiet" type="button" onClick={() => fileInputRef.current?.click()}>{t(imageUrl ? 'Replace image' : 'Open image')}</button>
-          <button className="button button-quiet" type="button" onClick={() => setCameraOpen(true)}>{t('Camera')}</button>
           {imageUrl && <button className="button button-unload" type="button" title={t('Unload image and clear its measurements')} onClick={unloadImage}><span aria-hidden="true">×</span> {t('Unload')}</button>}
           <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" onChange={handleUpload} />
         </div>
@@ -1547,16 +1545,13 @@ function App() {
                 className={`measurement-canvas cursor-${tool}`}
               />
             ) : (
-              <div className="empty-state">
+              <button className="empty-state" type="button" onClick={() => fileInputRef.current?.click()}>
                 <span className="empty-target" aria-hidden="true"><i /></span>
                 <strong>{t("Let's measure some spores")}</strong>
                 <span>{pendingImport ? t('Open {imageName} to restore its measurements', { imageName: pendingImport.imageName }) : t('Open a microscope image to start measuring')}</span>
-                <div className="empty-actions">
-                  <button className="button button-primary" type="button" onClick={() => fileInputRef.current?.click()}>{t('Choose image')}</button>
-                  <button className="button button-primary" type="button" onClick={() => setCameraOpen(true)}>{t('Use camera')}</button>
-                </div>
+                <span className="button button-primary">{t('Choose image')}</span>
                 <span className="supported-types">TIFF · PNG · JPEG · WEBP</span>
-              </div>
+              </button>
             )}
             {processingOpen && imageSize && cropViewTransform && <div className="crop-workspace-overlay" onPointerDown={cropPointerDown} onPointerMove={cropPointerMove} onPointerUp={(event) => { if (cropDragRef.current?.pointerId === event.pointerId) cropDragRef.current = null }} onPointerCancel={() => { cropDragRef.current = null }} onLostPointerCapture={() => { cropDragRef.current = null }}>
               <div className="crop-outline" style={{ left: cropViewTransform.left + crop.x * cropViewTransform.scale, top: cropViewTransform.top + crop.y * cropViewTransform.scale, width: crop.width * cropViewTransform.scale, height: crop.height * cropViewTransform.scale }}>
@@ -1851,10 +1846,6 @@ function App() {
         </aside>
       </section>
       {libraryOpen && <ProjectLibrary imageRecords={savedImageRecords} sets={savedSets} activeImageRecordId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredImageRecord} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onDeleteMany={removeProjects} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
-      {cameraOpen && <CameraDialog onClose={() => setCameraOpen(false)} onCapture={(blob) => {
-        setCameraOpen(false)
-        loadImage(URL.createObjectURL(blob), `camera-${new Date().toISOString().replace(/[:.]/g, '-')}.png`, null, undefined, blob)
-      }} t={t} />}
       {summarySettingsOpen && <SummarySettingsDialog settings={summarySettings} onChange={setSummarySettings} onClose={() => setSummarySettingsOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
         {detectionNotice && detectionNotice.imageUrl === imageUrl && <>
