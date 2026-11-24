@@ -1853,7 +1853,7 @@ function App() {
       {libraryOpen && <ProjectLibrary imageRecords={savedImageRecords} sets={savedSets} activeImageRecordId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredImageRecord} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onDeleteMany={removeProjects} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
       {cameraOpen && <CameraDialog onClose={() => setCameraOpen(false)} onCapture={(blob) => {
         setCameraOpen(false)
-        loadImage(URL.createObjectURL(blob), `camera-${new Date().toISOString().replace(/[:.]/g, '-')}.png`, null, undefined, blob)
+        loadImage(URL.createObjectURL(blob), `camera-${new Date().toISOString().replace(/[:.]/g, '-')}.png`, null, undefined, blob.type === 'image/png' ? blob : undefined)
       }} t={t} />}
       {summarySettingsOpen && <SummarySettingsDialog settings={summarySettings} onChange={setSummarySettings} onClose={() => setSummarySettingsOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
