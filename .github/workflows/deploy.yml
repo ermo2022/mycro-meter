@@ -54,3 +54,14 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Delete artifact if deployment failed
+        # When the deployment API call fails, the artifacts are not cleaned up correctly
+        # and the next attempt (!) run will cause an error.
+        # See more:
+        # https://github.com/tenstorrent/tt-metal/issues/17623
+        if: ${{ failure() }}
+        uses: geekyeggo/delete-artifact@v6
+        continue-on-error: true
+        with:
+            name: github-pages
