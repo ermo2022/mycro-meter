@@ -1,6 +1,10 @@
 {
   "languageName": "Nederlands",
   "messages": {
+    "More": "Meer",
+    "Workflow": "Werkstroom",
+    "Results": "Resultaten",
+    "Close panel": "Paneel sluiten",
     "Outline matching": "Contourherkenning",
     "Smoothing": "Afvlakking",
     "Boundary sensitivity": "Randgevoeligheid",
@@ -9,8 +13,11 @@
     "Recover incomplete rims": "Onvolledige randen herstellen",
     "Tentative recoveries": "Voorlopige kandidaten",
     "Include tentative recoveries": "Voorlopige kandidaten opnemen",
+    "Include tentative recoveries ({count})": "Voorlopige kandidaten opnemen ({count})",
+    "{count} direct + split matches (+ reference)": "{count} directe + gesplitste overeenkomsten (+ referentie)",
     "Record detections": "Detecties vastleggen",
     "Review detections": "Detecties controleren",
+    "Review detections ({count})": "Detecties controleren ({count})",
     "Review detected spores": "Gedetecteerde sporen controleren",
     "Click a spore image to resize or rotate its box. Delete false detections before accepting.": "Klik op de afbeelding van een spore om de omkadering aan te passen. Verwijder foutieve detecties voordat je ze bevestigt.",
     "Cancel review": "Controle annuleren",

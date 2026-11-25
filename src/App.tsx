@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
 import * as UTIF from 'utif'
 import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Settings2, Trash2, X } from 'lucide-react'
 import { adjustImageCrop, constrainCropToBounds, cropContainsBounds, measurementCropBounds, resampleMicroscopeImage, translateCroppedMeasurements, type CropHandle, type ImageCrop } from './imageResampler'
@@ -18,6 +18,7 @@ type EditorTransform = { cropX: number; cropY: number; cropWidth: number; cropHe
 type EditorDrag = { handle: BoxHandle; rect: BoxRectangle; start: Point; offset: Point }
 type CalibrationDraft = { start: Point; end: Point }
 type Tool = 'measure' | 'calibrate' | 'select' | 'pan'
+type MobilePanel = 'scale' | 'detection' | 'measurements' | 'results' | 'crop'
 type Language = string
 type LocaleData = {
   languageName: string
@@ -34,6 +35,12 @@ const locales = Object.fromEntries(Object.entries(localeModules).map(([path, loc
 
 function formatMessage(template: string, values: Record<string, string | number> = {}) {
   return template.replace(/\{([^}]+)\}/g, (_, key: string) => String(values[key] ?? ''))
+}
+
+function SummaryText({ text }: { text: string }) {
+  return text.split(/(?<=[,;])\s+|\s+(?=×)/).map((part, index) => (
+    <Fragment key={index}>{index > 0 && ' '}<span className="summary-part">{part}</span></Fragment>
+  ))
 }
 
 function translateStatus(status: string, locale: LocaleData) {
@@ -224,6 +231,8 @@ function App() {
   const [calibrationPresetBusy, setCalibrationPresetBusy] = useState(false)
   const [calibrationPresetError, setCalibrationPresetError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel | null>(null)
   const [summarySettingsOpen, setSummarySettingsOpen] = useState(false)
   const [summarySettings, setSummarySettings] = useState<SummarySettings>(() => {
     const method = window.localStorage.getItem('mycrometer-summary-method')
@@ -261,7 +270,7 @@ function App() {
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 })
   const [calibration, setCalibration] = useState<Calibration | null>(null)
-  const [scaleExpanded, setScaleExpanded] = useState(false)
+  const [desktopPanel, setDesktopPanel] = useState<'scale' | 'results' | null>(null)
   const [pendingImport, setPendingImport] = useState<ImageMeasurementData | null>(null)
   const [calibrationDraft, setCalibrationDraft] = useState<CalibrationDraft | null>(null)
   const [calibrationLocked, setCalibrationLocked] = useState(false)
@@ -325,6 +334,8 @@ function App() {
     values,
   )
   const referenceRect = sporeReference?.rect
+  const tentativeMatchCount = sporeReference?.matches?.matches.filter((match) => match.recovery).length ?? 0
+  const directSplitMatchCount = (sporeReference?.matches?.matches.length ?? 0) - tentativeMatchCount
   const exportableDetections: DetectionReviewItem[] = sporeReference?.matches
     ? [
         { ...sporeReference.rect, id: 'reference-spore' },
@@ -617,7 +628,7 @@ function App() {
     detectionEpochRef.current += 1
     measurementGestureRef.current = null
     setCalibration(imageRecord.calibration)
-    setScaleExpanded(false)
+    setDesktopPanel(null)
     if (imageRecord.calibration && !preserveDetectionSettings) applyDetectionAreaDefaults(imageRecord.calibration, imageRecord.imageWidth)
     setCalibrationDraft(null)
     setCalibrationLocked(false)
@@ -681,11 +692,12 @@ function App() {
       setImageId(restoredId ?? crypto.randomUUID())
       setImageBlob(png)
       setProcessingOpen(false)
+      setMobilePanel(null)
       setPendingImport(null)
       setMeasurements([])
       setBoxEditor(null)
       setCalibration(null)
-      setScaleExpanded(false)
+      setDesktopPanel(null)
       setSelectedCalibrationPresetId('')
       setCalibrationPresetName('')
       setCalibrationDraft(null)
@@ -804,6 +816,7 @@ function App() {
     imageLoadEpochRef.current += 1
     setImageBlob(null)
     setProcessingOpen(false)
+    setMobilePanel(null)
     detectionEpochRef.current += 1
     measurementGestureRef.current = null
     imageRef.current = null
@@ -813,7 +826,7 @@ function App() {
     setImageId('')
     setImageSize(null)
     setCalibration(null)
-    setScaleExpanded(false)
+    setDesktopPanel(null)
     setSelectedCalibrationPresetId('')
     setCalibrationPresetName('')
     setCalibrationDraft(null)
@@ -887,6 +900,7 @@ function App() {
 
   const startAutoDetect = () => {
     if (!calibration || detecting || matchingBusy) return
+    setMobilePanel(null)
     setSelectingReference(true)
     setTool('measure')
     setCalibrationDraft(null)
@@ -898,6 +912,13 @@ function App() {
   const cancelAutoDetect = () => {
     setSelectingReference(false)
     setStatus('Reference selection cancelled')
+  }
+
+  const closeMobilePanel = () => {
+    setMobilePanel(null)
+    document.querySelector<HTMLButtonElement>(mobilePanel === 'detection'
+      ? '.mobile-menu-toggle'
+      : `.mobile-workflow [data-panel="${mobilePanel}"]`)?.focus()
   }
 
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -1043,11 +1064,14 @@ function App() {
   }
 
   const collapseScale = () => {
-    setScaleExpanded(false)
-    requestAnimationFrame(() => scaleToggleRef.current?.focus({ preventScroll: true }))
+    setDesktopPanel(null)
+    requestAnimationFrame(() => {
+      if (scaleToggleRef.current?.getClientRects().length) scaleToggleRef.current.focus({ preventScroll: true })
+    })
   }
 
   const startCalibration = () => {
+    setMobilePanel(null)
     setTool('calibrate')
     setCalibrationDraft(null)
     setCalibrationLocked(false)
@@ -1060,7 +1084,6 @@ function App() {
     setSelectedCalibrationPresetId(preset.id)
     setCalibrationPresetName(preset.name)
     setCalibration(preset.calibration)
-    collapseScale()
     applyDetectionAreaDefaults(preset.calibration, imageSize?.x ?? 0)
     setCalibrationDraft(null)
     setCalibrationLocked(false)
@@ -1360,6 +1383,7 @@ function App() {
         calibration, measurements: translateCroppedMeasurements(measurements, crop),
       } : null
       setProcessingOpen(false)
+      setMobilePanel(null)
       loadImage(URL.createObjectURL(png), croppedName, imageRecord, undefined, png, true)
     } finally {
       setCropBusy(false)
@@ -1371,6 +1395,7 @@ function App() {
     setCrop({ x: 0, y: 0, width: imageSize.x, height: imageSize.y })
     setReduction(1)
     setProcessingOpen(true)
+    setMobilePanel('crop')
   }
 
   const clearMeasurements = () => {
@@ -1407,6 +1432,7 @@ function App() {
       setSporeReference({ rect, features: null, matches: null })
       setSelectingReference(false)
       setBoxEditor(null)
+      setMobilePanel(null)
       setStatus('Analysing reference spore…')
       return
     }
@@ -1518,22 +1544,41 @@ function App() {
     setCrop(constrainCropToBounds(next, measurementBounds, imageSize.x, imageSize.y, start.handle === 'move'))
   }
 
+  const translatedStatus = translateStatus(status, locale)
+  const compactStatus = translatedStatus.split(/\s+·\s+|:\s+(?![^()]*\))/, 1)[0]
+  const detectionMatchSummary = sporeReference?.matches && <p className="detection-match-count" role="status">{t('{count} direct + split matches (+ reference)', { count: directSplitMatchCount })}</p>
+  const tentativeRecoveryControl = <label><input type="checkbox" checked={includeTentativeMeasurements} onChange={(event) => setIncludeTentativeMeasurements(event.target.checked)} />{sporeReference?.matches ? t('Include tentative recoveries ({count})', { count: tentativeMatchCount }) : t('Include tentative recoveries')}</label>
+  const reviewDetectionsButton = <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length || measurements.length >= MAX_IMAGE_RECORD_MEASUREMENTS} onClick={openDetectionReview}><Plus size={16} aria-hidden="true" />{sporeReference?.matches ? t('Review detections ({count})', { count: exportableDetections.length }) : t('Review detections')}</button>
+
   return (
     <main className="app-shell" lang={language}>
-      <header className="topbar">
+      <header className="topbar" onKeyDown={(event) => {
+        if (event.key === 'Escape' && mobileMenuOpen) {
+          setMobileMenuOpen(false)
+          event.currentTarget.querySelector<HTMLButtonElement>('.mobile-menu-toggle')?.focus()
+        }
+      }} onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setMobileMenuOpen(false)
+      }}>
         <a className="brand" href={import.meta.env.BASE_URL} aria-label={t('Mycrometer home')}>
           <span className="brand-mark" aria-hidden="true"><i /></span>
           <span>mycro<span className="brand-light">meter</span></span>
         </a>
         <div className="topbar-file" title={imageName}>{imageName || t('Untitled image')}</div>
-        <div className="topbar-actions">
+        <button className="button button-quiet mobile-menu-toggle" type="button" aria-expanded={mobileMenuOpen} aria-controls="topbar-actions" onClick={() => setMobileMenuOpen((open) => !open)}>{t('More')}</button>
+        <div id="topbar-actions" className="topbar-actions" data-mobile-open={mobileMenuOpen}>
           <span className="offline-indicator"><i />{t('Local workspace')}</span>
-            <label className="language-picker"><span>{t('Language')}</span><select aria-label={t('Language')} value={language} onChange={(event) => setLanguage(event.target.value)}>{Object.entries(locales).map(([code, languageLocale]) => <option key={code} value={code}>{languageLocale.languageName}</option>)}</select></label>
-          <button className="button button-quiet" type="button" onClick={() => setLibraryOpen(true)}><FolderOpen size={16} />{t('Saved projects')}</button>
-          <button className="button button-quiet" type="button" title={t('Import ZIP project or image record CSV')} onClick={() => importInputRef.current?.click()}>{t('Import project')}</button>
+            <label className="language-picker"><span>{t('Language')}</span><select aria-label={t('Language')} value={language} onChange={(event) => { setLanguage(event.target.value); setMobileMenuOpen(false) }}>{Object.entries(locales).map(([code, languageLocale]) => <option key={code} value={code}>{languageLocale.languageName}</option>)}</select></label>
+          {calibration && <button className="button button-quiet mobile-detection-settings" type="button" disabled={processingOpen} aria-controls="measure-panel" onClick={() => {
+            setMobileMenuOpen(false)
+            setMobilePanel('detection')
+            requestAnimationFrame(() => previewButtonRef.current?.focus())
+          }}><Settings2 size={16} />{t('Detection settings')}</button>}
+          <button className="button button-quiet" type="button" onClick={() => { setMobileMenuOpen(false); setLibraryOpen(true) }}><FolderOpen size={16} />{t('Saved projects')}</button>
+          <button className="button button-quiet" type="button" title={t('Import ZIP project or image record CSV')} onClick={() => { setMobileMenuOpen(false); importInputRef.current?.click() }}>{t('Import project')}</button>
           <input ref={importInputRef} className="visually-hidden" type="file" accept=".zip,.myproj,.csv,application/zip,text/csv,image/*" multiple onChange={handleImport} />
-          <button className="button button-quiet" type="button" onClick={() => fileInputRef.current?.click()}>{t(imageUrl ? 'Replace image' : 'Open image')}</button>
-          {imageUrl && <button className="button button-unload" type="button" title={t('Unload image and clear its measurements')} onClick={unloadImage}><span aria-hidden="true">×</span> {t('Unload')}</button>}
+          <button className="button button-quiet" type="button" onClick={() => { setMobileMenuOpen(false); fileInputRef.current?.click() }}>{t(imageUrl ? 'Replace image' : 'Open image')}</button>
+          {imageUrl && <button className="button button-unload" type="button" title={t('Unload image and clear its measurements')} onClick={() => { setMobileMenuOpen(false); unloadImage() }}><span aria-hidden="true">×</span> {t('Unload')}</button>}
           <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" onChange={handleUpload} />
         </div>
       </header>
@@ -1541,10 +1586,10 @@ function App() {
       <section className={`workspace ${processingOpen ? 'is-cropping' : ''}`}>
         <aside className="tool-rail" aria-label={t('Tools')}>
           {imageSize && <div className="rail-group">
-            {calibration && <button className={`tool-button ${tool === 'measure' ? 'is-active' : ''}`} type="button" title={t('Measure object')} aria-label={t('Measure object')} disabled={!calibration} onClick={() => { setTool('measure'); setCalibrationDraft(null); setManualStart(null); setManualDraft(null) }}><span className="tool-glyph box-glyph" /></button>}
-            <button className={`tool-button ${tool === 'calibrate' ? 'is-active' : ''}`} type="button" title={t('Calibrate scale')} aria-label={t('Calibrate scale')} onClick={() => { setTool('calibrate'); setManualStart(null); setManualDraft(null); setStatus(calibrationLocked ? 'Drag either end to adjust, then enter the distance' : 'Click two points on a known scale bar') }}><span className="tool-glyph calibrate-glyph" /></button>
-            {calibration && measurements.length > 0 && <button className={`tool-button ${tool === 'select' ? 'is-active' : ''}`} type="button" title={t('Select or edit a box')} aria-label={t('Select or edit a box')} disabled={!calibration || !measurements.length} onClick={() => setTool('select')}><span className="tool-glyph select-glyph"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v12l3.2-3.1 2.1 4.6 2-.9-2.1-4.5H12z" /></svg></span></button>}
-            <button className={`tool-button ${tool === 'pan' ? 'is-active' : ''}`} type="button" title={t('Pan image')} aria-label={t('Pan image')} onClick={() => setTool('pan')}><span className="tool-glyph pan-glyph" /></button>
+            {calibration && <button className={`tool-button ${tool === 'measure' ? 'is-active' : ''}`} type="button" title={t('Measure object')} aria-label={t('Measure object')} disabled={!calibration} onClick={() => { setMobilePanel(null); setTool('measure'); setCalibrationDraft(null); setManualStart(null); setManualDraft(null) }}><span className="tool-glyph box-glyph" /></button>}
+            <button className={`tool-button ${tool === 'calibrate' ? 'is-active' : ''}`} type="button" title={t('Calibrate scale')} aria-label={t('Calibrate scale')} onClick={() => { setMobilePanel(null); setTool('calibrate'); setManualStart(null); setManualDraft(null); setStatus(calibrationLocked ? 'Drag either end to adjust, then enter the distance' : 'Click two points on a known scale bar') }}><span className="tool-glyph calibrate-glyph" /></button>
+            {calibration && measurements.length > 0 && <button className={`tool-button ${tool === 'select' ? 'is-active' : ''}`} type="button" title={t('Select or edit a box')} aria-label={t('Select or edit a box')} disabled={!calibration || !measurements.length} onClick={() => { setMobilePanel(null); setTool('select') }}><span className="tool-glyph select-glyph"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v12l3.2-3.1 2.1 4.6 2-.9-2.1-4.5H12z" /></svg></span></button>}
+            <button className={`tool-button ${tool === 'pan' ? 'is-active' : ''}`} type="button" title={t('Pan image')} aria-label={t('Pan image')} onClick={() => { setMobilePanel(null); setTool('pan') }}><span className="tool-glyph pan-glyph" /></button>
           </div>}
           {calibration && (measurements.length > 0 || manualStart) && <>
           <div className="rail-divider" />
@@ -1568,13 +1613,22 @@ function App() {
               <span className="context-label">{t('IMAGE')}</span>
               <span className="context-value">{imageSize ? `${imageSize.x} × ${imageSize.y} px` : t('Waiting for image')}</span>
             </div>
-            <div className="canvas-status"><span className={`tool-dot ${tool}`} />{translateStatus(status, locale)}</div>
+            <div className="canvas-status" title={translatedStatus}>
+              <span className={`tool-dot ${tool}`} />
+              <span className="canvas-status-full">{translatedStatus}</span>
+              <span className="canvas-status-compact">{compactStatus}</span>
+            </div>
             {imageSize && <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>}
-            {imageSize && <button className={`tool-button ${processingOpen ? 'is-active' : ''}`} type="button" title={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample before calibration')} aria-label={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample')} aria-pressed={processingOpen} disabled={cropBusy || detecting || matchingBusy || selectingReference} onClick={() => processingOpen ? setProcessingOpen(false) : openCrop()}><Crop size={17} /></button>}
+            {imageSize && <button className={`tool-button ${processingOpen ? 'is-active' : ''}`} type="button" title={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample before calibration')} aria-label={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample')} aria-pressed={processingOpen} disabled={cropBusy || detecting || matchingBusy || selectingReference} onClick={() => { if (processingOpen) { setProcessingOpen(false); setMobilePanel(null) } else openCrop() }}><Crop size={17} /></button>}
           </div>
+          {selectingReference && <div className="mobile-reference-prompt" role="status"><span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span><button className="text-button" type="button" onClick={cancelAutoDetect}>{t('Cancel')}</button></div>}
+          {(detecting || matchingBusy) && <div className="detection-progress" role="status">
+            <span className="activity-spinner" aria-hidden="true" />
+            <span>{t(matchingBusy ? sporeReference?.features ? 'Searching the image for matching spores…' : 'Analysing reference spore…' : 'Detecting…')}</span>
+          </div>}
           {calibration && boxMeasurements.length > 0 && <section className="spore-title-bar" aria-label={t('Mycological spore summary')}>
             <div className="summary-heading"><span className="eyebrow">{t(summaryMethodLabels[summarySettings.method])}</span><button className="tool-button" type="button" title={t('Configure mycological summary')} aria-label={t('Configure mycological summary')} onClick={() => setSummarySettingsOpen(true)}><Settings2 size={16} /></button></div>
-            <strong>{mycologicalTitle}</strong>
+            <strong><SummaryText text={mycologicalTitle} /></strong>
           </section>}
           <div className={`canvas-wrap ${!imageSize ? 'is-empty' : ''}`} ref={viewRef}>
             {imageUrl ? (
@@ -1630,34 +1684,53 @@ function App() {
               </form>
             )}
           </div>
+          {sporeReference?.matches && !matchingBusy && !selectingReference && !processingOpen && <div className="mobile-detection-actions" role="region" aria-label={t('Review detections')}>
+            {detectionMatchSummary}
+            {tentativeRecoveryControl}
+            {reviewDetectionsButton}
+          </div>}
           <footer className="image-footer">
             <span>{imageSize ? `${imageSize.x} × ${imageSize.y} px` : t('No image loaded')}</span>
             <span className="footer-separator">/</span>
             <span>{calibration ? scaleText : t('Not calibrated')}</span>
             <span className="footer-spacer" />
             <span>{t(tool === 'measure' ? 'Measure object' : tool === 'calibrate' ? 'Click two points on a known length' : tool === 'select' ? 'Click a box to edit its measurement' : 'Drag to move image')}</span>
+            {storageStatus && <span className="mobile-storage-status" role="status">{t(storageStatus)}</span>}
           </footer>
         </div>
 
-        <aside className="measure-panel">
+        <aside id="measure-panel" className="measure-panel" data-mobile-panel={mobilePanel ?? ''} data-desktop-panel={desktopPanel ?? ''} onKeyDown={(event) => {
+          if (event.key !== 'Escape') return
+          if (window.matchMedia('(max-width: 560px)').matches && mobilePanel) {
+            closeMobilePanel()
+          } else if (desktopPanel) {
+            document.querySelector<HTMLButtonElement>(`.sidebar-workflow [data-panel="${desktopPanel}"]`)?.focus()
+            setDesktopPanel(null)
+          }
+        }}>
           <div className="panel-heading">
             <div>
               <span className="eyebrow">{t('ANALYSIS')}</span>
-              <h1 className={panelTitle === 'Measurements' ? 'measurements-heading' : undefined}>{t(panelTitle)}</h1>
+              <h1 className={`desktop-panel-title ${panelTitle === 'Measurements' ? 'measurements-heading' : ''}`}>{t(panelTitle)}</h1>
+              <h1 className="mobile-panel-title">{t(mobilePanel === 'crop' ? panelTitle : mobilePanel === 'scale' ? 'Image scale' : mobilePanel === 'detection' ? 'Detection settings' : mobilePanel === 'measurements' ? 'Measurements' : 'Results')}</h1>
             </div>
             {measurements.length > 0 && <span className="count-badge">{measurements.length.toString().padStart(2, '0')}</span>}
+            <button className="tool-button mobile-panel-close" type="button" aria-label={t('Close panel')} onClick={closeMobilePanel}><X size={18} /></button>
           </div>
 
-          {processingOpen && imageRef.current ? <ImageProcessingPanel image={imageRef.current} crop={crop} onCropChange={setCrop} reduction={reduction} onReductionChange={setReduction} measurementBounds={measurementBounds} preserveScale={!!calibration || measurements.length > 0} hasReference={!!sporeReference} onApply={processImage} onClose={() => setProcessingOpen(false)} t={t} /> : <>
-          {imageSize && <section className="scale-section">
+          {processingOpen && imageRef.current ? <ImageProcessingPanel image={imageRef.current} crop={crop} onCropChange={setCrop} reduction={reduction} onReductionChange={setReduction} measurementBounds={measurementBounds} preserveScale={!!calibration || measurements.length > 0} hasReference={!!sporeReference} onApply={processImage} onClose={() => { setProcessingOpen(false); setMobilePanel(null) }} t={t} /> : <>
+          {(imageSize || imageBlob || setSnapshots.length > 0) && <nav className="sidebar-workflow" aria-label={t('Workflow')}>
+            {imageSize && <button ref={scaleToggleRef} type="button" data-panel="scale" aria-controls="image-scale-section" aria-expanded={desktopPanel === 'scale'} onClick={() => setDesktopPanel((panel) => panel === 'scale' ? null : 'scale')}>{t('Image scale')}</button>}
+            {(imageBlob || setSnapshots.length > 0) && <button type="button" data-panel="results" aria-controls="sidebar-results" aria-expanded={desktopPanel === 'results'} onClick={() => setDesktopPanel((panel) => panel === 'results' ? null : 'results')}>{t('Results')}</button>}
+          </nav>}
+          {imageSize && <section id="image-scale-section" className="scale-section" data-mobile-group="scale">
             <div className="section-title scale-summary">
               <span>{t('Image scale')}</span>
               {calibration ? <>
                 <span className="scale-summary-value">{scaleText}</span>
-                <button ref={scaleToggleRef} className="text-button" type="button" aria-label={t(scaleExpanded ? 'Close image scale settings' : 'Edit image scale')} aria-expanded={scaleExpanded} aria-controls="image-scale-settings" onClick={() => setScaleExpanded((expanded) => !expanded)}>{t(scaleExpanded ? 'Close' : 'Edit')}</button>
               </> : <button className="text-button" type="button" onClick={startCalibration}>{t('Calibrate')}</button>}
             </div>
-            <div id="image-scale-settings" hidden={!!calibration && !scaleExpanded}>
+            <div id="image-scale-settings">
             {calibration ? <button className="text-button scale-calibrate" type="button" onClick={startCalibration}>{t('Calibrate')}</button> : <>
             <div className="scale-readout">
               <span className="scale-symbol" aria-hidden="true">↔</span>
@@ -1699,7 +1772,7 @@ function App() {
             </div>
           </section>}
 
-          {calibration && <section className="detection-settings" aria-labelledby="detection-settings-title">
+          {calibration && <section className="detection-settings" data-mobile-group="detection" aria-labelledby="detection-settings-title">
             <button className="button button-primary auto-detect-button" type="button" disabled={!imageSize || detecting || selectingReference || matchingBusy} onClick={startAutoDetect}>
               {(detecting || matchingBusy) && <span className="activity-spinner" aria-hidden="true" />}
               {t(detecting || matchingBusy ? 'Detecting…' : 'Auto-detect')}
@@ -1753,9 +1826,10 @@ function App() {
                 {(matchingSettings.relativeContrast || matchingSettings.recoverIncompleteRims) && <li><i className="is-tentative" aria-hidden="true" />{t('Tentative recoveries')}<strong>{sporeReference.matches.matches.filter((match) => match.recovery).length}</strong></li>}
               </ul>}
               <div className="detection-export-controls">
-                <label><input type="checkbox" checked={includeTentativeMeasurements} onChange={(event) => setIncludeTentativeMeasurements(event.target.checked)} />{t('Include tentative recoveries')}</label>
+                {detectionMatchSummary}
+                {tentativeRecoveryControl}
                 <div className="detection-export-actions">
-                  <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length || measurements.length >= MAX_IMAGE_RECORD_MEASUREMENTS} onClick={openDetectionReview}><Plus size={16} aria-hidden="true" />{t('Review detections')}</button>
+                  {reviewDetectionsButton}
                   <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length} onClick={exportDetectedSpores}><Download size={16} aria-hidden="true" />{t('Export detections CSV')}</button>
                 </div>
               </div>
@@ -1799,7 +1873,7 @@ function App() {
             </div>}
           </section>}
 
-          {(calibration || measurements.length > 0) && <section className="results-section">
+          {(calibration || measurements.length > 0) && <section className="results-section" data-mobile-group="measurements">
             <div className="section-title"><span>{t('Measurements')}</span>{calibration && measurements.length > 0 && <button className="text-button" type="button" onClick={exportRawCsv} title={t('Length and width values only')}>{t('Export CSV')}</button>}</div>
             {measurements.length ? (
               <div className="measurement-list-scroll" role="region" aria-label={t('Measurement list')} tabIndex={0}>
@@ -1831,7 +1905,9 @@ function App() {
             )}
           </section>}
 
-          {calibration && boxMeasurements.length > 0 && <section className="overview-section" aria-labelledby="overview-title">
+          <div id="sidebar-results" className="sidebar-results">
+          <div className="results-content">
+          {calibration && boxMeasurements.length > 0 && <section className="overview-section" data-mobile-group="results" aria-labelledby="overview-title">
             <div className="section-title"><span id="overview-title">{t('Spore overview')}</span><span className="overview-n">N = {boxMeasurements.length}</span></div>
             <div className="overview-table" role="table" aria-label={t('Spore size and Q summary')}>
               <div className="overview-row overview-header" role="row"><span role="columnheader">{t('Metric')}</span><span role="columnheader">{t('Mean ± SD')}</span><span role="columnheader">D1–D9</span></div>
@@ -1842,7 +1918,7 @@ function App() {
             <p className="overview-note">{t('Q = length ÷ width. SD uses n−1; D1–D9 are interpolated 10th–90th percentiles, with observed extremes in parentheses.')}</p>
           </section>}
 
-          {(setSnapshots.length > 0 || (calibration && measurements.length > 0)) && <section className="overview-section measurement-set-section" aria-labelledby="measurement-set-title">
+          {(setSnapshots.length > 0 || (calibration && measurements.length > 0)) && <section className="overview-section measurement-set-section" data-mobile-group="results" aria-labelledby="measurement-set-title">
             <div className="section-title"><span id="measurement-set-title">{t('Measurement set')}</span><div className="set-header-actions"><span className="overview-n">{t('{count} images · N = {total}', { count: measurementSet.length, total: setBoxes.length })}</span><button className="tool-button" type="button" title={t('Close image and set')} aria-label={t('Close image and set')} onClick={closeCurrentWork}><X size={16} /></button></div></div>
             <div className="set-name-field"><input aria-label={t('Set name')} placeholder={t('Set name')} value={setName} onChange={(event) => setSetName(event.target.value)} /><button className="tool-button" type="button" title={t('New set')} aria-label={t('New set')} onClick={newSet}><Plus size={17} /></button></div>
             {calibration && measurements.length > 0 && <button className="button set-save-button" type="button" onClick={saveImageToSet}>
@@ -1866,7 +1942,7 @@ function App() {
                 <div className="overview-row" role="row"><span role="rowheader">{t('Width')}</span><span role="cell">{formatSummary(setWidthStats, setUnit)}</span><span role="cell">{formatDeciles(setWidthStats, setUnit)}</span></div>
                 <div className="overview-row" role="row"><span role="rowheader">Q</span><span role="cell">{formatSummary(setQStats, '')}</span><span role="cell">{formatDeciles(setQStats, '')}</span></div>
               </div>
-              {setBoxes.length > 0 && <div className="set-summary"><div className="summary-heading"><span className="eyebrow">{t(summaryMethodLabels[summarySettings.method])}</span><button className="tool-button" type="button" title={t('Configure mycological summary')} aria-label={t('Configure mycological summary')} onClick={() => setSummarySettingsOpen(true)}><Settings2 size={16} /></button></div><p>{formatMycologicalSummary(setLengthStats, setWidthStats, setQStats, setUnit, summarySettings, t('SD n/a'))}</p></div>}
+              {setBoxes.length > 0 && <div className="set-summary"><div className="summary-heading"><span className="eyebrow">{t(summaryMethodLabels[summarySettings.method])}</span><button className="tool-button" type="button" title={t('Configure mycological summary')} aria-label={t('Configure mycological summary')} onClick={() => setSummarySettingsOpen(true)}><Settings2 size={16} /></button></div><p><SummaryText text={formatMycologicalSummary(setLengthStats, setWidthStats, setQStats, setUnit, summarySettings, t('SD n/a'))} /></p></div>}
               <div className="set-actions">
                 <button className="text-button" type="button" onClick={() => { const record = activeSet(); void exportProject(record.images, record) }}><Download size={14} />{t('Export set')}</button>
                 <button className="text-button" type="button" title={t('Combined measurement values with source image names; not an image record file')} onClick={() => exportCsv(measurementSetCsv(measurementSet, setUnit), 'mycrometer-set.csv')}>{t('Export set CSV')}</button>
@@ -1875,8 +1951,9 @@ function App() {
               <div className="summary-line set-total"><span>{t('Set measurements')}</span><strong>{setMeasurementCount}</strong></div>
             </>}
           </section>}
+          </div>
 
-          {(imageBlob || setSnapshots.length > 0) && <div className="panel-bottom">
+          {(imageBlob || setSnapshots.length > 0) && <div className="panel-bottom" data-mobile-group="results">
             {(calibration || setSnapshots.length > 0) && <div className="summary-line"><span>{t(setSnapshots.length ? 'Set measurements' : 'Total measurements')}</span><strong>{setSnapshots.length ? setMeasurementCount : measurements.length}</strong></div>}
             {((calibration && imageBlob) || setSnapshots.length > 0) && <div className="project-export-actions">
               <button className="button button-export" type="button" onClick={exportActiveProject} disabled={!setSnapshots.length && !imageBlob} title={t(setSnapshots.length ? 'ZIP with all set images, calibrations, geometry and CSV' : 'ZIP with PNG image, calibration, geometry and CSV')}><Download size={16} /> {t(setSnapshots.length ? 'Export set' : 'Export image record')}</button>
@@ -1886,9 +1963,20 @@ function App() {
             {(calibration || setSnapshots.length > 0) && <p className="storage-warning">{t('Browser storage can be cleared. Export a ZIP backup to keep a separate copy.')}</p>}
             <p className="privacy-note"><span aria-hidden="true">◈</span> {t('Images stay on this device')}</p>
           </div>}
+          </div>
           </>}
         </aside>
       </section>
+      <nav className="mobile-workflow" aria-label={t('Workflow')}>
+        {processingOpen ? (
+          <button type="button" data-panel="crop" aria-controls="measure-panel" aria-expanded={mobilePanel === 'crop'} onClick={() => setMobilePanel((panel) => panel === 'crop' ? null : 'crop')}>{t(calibration || measurements.length ? 'Crop image' : 'Crop and resample')}</button>
+        ) : <>
+          {imageSize && <button type="button" data-panel="scale" aria-controls="measure-panel" aria-expanded={mobilePanel === 'scale'} onClick={() => setMobilePanel((panel) => panel === 'scale' ? null : 'scale')}>{t('Image scale')}</button>}
+          {calibration && <button type="button" disabled={!imageSize || detecting || selectingReference || matchingBusy} onClick={startAutoDetect}>{t(detecting || matchingBusy ? 'Detecting…' : 'Auto-detect')}</button>}
+          {(calibration || measurements.length > 0) && <button type="button" data-panel="measurements" aria-controls="measure-panel" aria-expanded={mobilePanel === 'measurements'} onClick={() => setMobilePanel((panel) => panel === 'measurements' ? null : 'measurements')}>{t('Measurements')} ({measurements.length})</button>}
+          {(imageBlob || setSnapshots.length > 0) && <button type="button" data-panel="results" aria-controls="measure-panel" aria-expanded={mobilePanel === 'results'} onClick={() => setMobilePanel((panel) => panel === 'results' ? null : 'results')}>{t('Results')}</button>}
+        </>}
+      </nav>
       {libraryOpen && <ProjectLibrary imageRecords={savedImageRecords} sets={savedSets} activeImageRecordId={imageId} activeSetId={setSnapshots.length ? setId : ''} onOpen={openStoredImageRecord} onOpenSet={openStoredSet} onDelete={(id, kind) => { if (window.confirm(t('Delete this saved project?'))) void removeProject(id, kind) }} onDeleteMany={removeProjects} onExport={(record) => { void exportProject([record]) }} onExportSet={(record) => { void exportProject(record.images, record) }} onClose={() => setLibraryOpen(false)} t={t} />}
       {summarySettingsOpen && <SummarySettingsDialog settings={summarySettings} onChange={setSummarySettings} onClose={() => setSummarySettingsOpen(false)} t={t} />}
       <div className="detection-notice" role="status" aria-live="polite" aria-atomic="true">
