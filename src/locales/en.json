@@ -1,6 +1,10 @@
 {
   "languageName": "English",
   "messages": {
+    "More": "More",
+    "Workflow": "Workflow",
+    "Results": "Results",
+    "Close panel": "Close panel",
     "Outline matching": "Outline matching",
     "Smoothing": "Smoothing",
     "Boundary sensitivity": "Boundary sensitivity",
@@ -9,8 +13,11 @@
     "Recover incomplete rims": "Recover incomplete rims",
     "Tentative recoveries": "Tentative recoveries",
     "Include tentative recoveries": "Include tentative recoveries",
+    "Include tentative recoveries ({count})": "Include tentative recoveries ({count})",
+    "{count} direct + split matches (+ reference)": "{count} direct + split matches (+ reference)",
     "Record detections": "Record detections",
     "Review detections": "Review detections",
+    "Review detections ({count})": "Review detections ({count})",
     "Review detected spores": "Review detected spores",
     "Click a spore image to resize or rotate its box. Delete false detections before accepting.": "Click a spore image to resize or rotate its box. Delete false detections before accepting.",
     "Cancel review": "Cancel review",
