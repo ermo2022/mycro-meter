@@ -37,6 +37,105 @@ test('box labels automatically report the longer dimension first', () => {
   assert.equal(formatBoxDimensionsText(80, 120), '120 × 80 px')
 })
 
+test('exiting auto-detect discards session drafts without changing recorded measurements or tuning', () => {
+  let reset
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'resetAutoDetect') reset = node.initializer
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert.ok(reset)
+  const { outputText } = ts.transpileModule(`const reset = ${reset.getText(source)}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  })
+
+  for (const phase of ['selecting', 'matching', 'results', 'reviewing', 'editing']) {
+    const measurements = [{ id: 1, name: 'B1' }]
+    const matchingSettings = { smoothing: 3, sensitivity: 6 }
+    const state = {
+      boxEditor: phase === 'selecting' || phase === 'editing' ? {} : null,
+      selectingReference: phase === 'selecting',
+      sporeReference: {}, matchingBusy: phase === 'matching',
+      detectionReview: [{}], detectionReviewError: 'Review error',
+      editingReviewId: phase === 'editing' ? 'candidate-1' : null,
+      recordingDetections: false, includeTentativeMeasurements: true, showRejectedOutlines: true,
+      manualStart: {}, manualDraft: {}, detecting: phase === 'selecting',
+      measurements, matchingSettings,
+    }
+    const referenceTokenRef = { current: 4 }
+    const detectionEpochRef = { current: 2 }
+    const dependencies = {
+      referenceTokenRef, detectionEpochRef,
+      selectingReference: state.selectingReference, editingReviewId: state.editingReviewId,
+      ...Object.fromEntries(Object.keys(state).map(key => [
+        `set${key[0].toUpperCase()}${key.slice(1)}`, value => { state[key] = value },
+      ])),
+    }
+    const reset = new Function(...Object.keys(dependencies), `${outputText}; return reset`)(...Object.values(dependencies))
+    reset()
+    assert.equal(referenceTokenRef.current, 5, phase)
+    assert.equal(detectionEpochRef.current, 3, phase)
+    assert.deepEqual(state, {
+      boxEditor: null, selectingReference: false, sporeReference: null, matchingBusy: false,
+      detectionReview: null, detectionReviewError: null, editingReviewId: null,
+      recordingDetections: false, includeTentativeMeasurements: false, showRejectedOutlines: false,
+      manualStart: null, manualDraft: null, detecting: false, measurements, matchingSettings,
+    }, phase)
+    reset()
+    assert.equal(state.sporeReference, null, 'repeated exits remain safe')
+  }
+})
+
+test('loading and unloading images clear the complete pending auto-detect session', async () => {
+  const declarations = new Map()
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && ['resetAutoDetect', 'loadImage', 'unloadImage'].includes(node.name.getText(source))) {
+      declarations.set(node.name.getText(source), node.initializer.getText(source))
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  const definitions = [...declarations].map(([name, value]) => `const ${name} = ${value}`).join('\n')
+  const { outputText } = ts.transpileModule(definitions, { compilerOptions: { target: ts.ScriptTarget.ES2022 } })
+
+  for (const action of ['loadImage', 'unloadImage']) {
+    let image
+    const state = {
+      sporeReference: {}, detectionReview: [{}], detectionReviewError: 'Review error',
+      editingReviewId: 'candidate-1', boxEditor: {}, selectingReference: false,
+      matchingBusy: true, recordingDetections: true,
+      includeTentativeMeasurements: true, showRejectedOutlines: true,
+    }
+    const referenceTokenRef = { current: 4 }
+    const dependencies = {
+      Image: class { naturalWidth = 600; naturalHeight = 400; constructor() { image = this } },
+      MAX_IMAGE_RECORD_IMAGE_PIXELS: 40_000_000,
+      imageLoadEpochRef: { current: 0 }, referenceTokenRef, detectionEpochRef: { current: 0 },
+      imageRef: { current: {} }, measurementGestureRef: { current: {} },
+      autoCircularCropAppliedRef: { current: true }, lastDetectionPointRef: { current: {} },
+      selectingReference: false, editingReviewId: 'candidate-1',
+      ...Object.fromEntries([...definitions.matchAll(/\b(set[A-Z]\w*)\(/g)].map(([, setter]) => [
+        setter, value => { state[setter[3].toLowerCase() + setter.slice(4)] = value },
+      ])),
+    }
+    const actions = new Function(...Object.keys(dependencies), `${outputText}; return { loadImage, unloadImage }`)(...Object.values(dependencies))
+    if (action === 'loadImage') {
+      actions.loadImage('blob:new-image', 'new.png', null, 'image-2', new Blob())
+      await image.onload()
+    } else {
+      actions.unloadImage()
+    }
+    assert.equal(referenceTokenRef.current, 5, action)
+    for (const key of ['sporeReference', 'detectionReview', 'detectionReviewError', 'editingReviewId', 'boxEditor']) {
+      assert.equal(state[key], null, `${action}: ${key}`)
+    }
+    for (const key of ['selectingReference', 'matchingBusy', 'recordingDetections', 'includeTentativeMeasurements', 'showRejectedOutlines']) {
+      assert.equal(state[key], false, `${action}: ${key}`)
+    }
+    assert.deepEqual(state.measurements, [], action)
+  }
+})
+
 test('analysis sections appear only when their prerequisite data is available', () => {
   const conditions = new Map()
   function visit(node) {

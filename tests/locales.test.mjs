@@ -11,6 +11,18 @@ function readLocale(code) {
 
 const en = readLocale('en')
 
+test('image menu labels resolve in every language without English fallback', () => {
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const labels = app.match(/t\(imageUrl \? '([^']+)' : '([^']+)'\)/)
+  assert.ok(labels, 'image menu label')
+  for (const key of labels.slice(1)) {
+    for (const fileName of localeFiles) {
+      const { messages } = readLocale(fileName.replace(/\.json$/, ''))
+      assert.ok(Object.hasOwn(messages, key), `${fileName} missing image action: ${key}`)
+    }
+  }
+})
+
 function placeholders(value) {
   return [...String(value).matchAll(/\{([^}]+)\}/g)].map(match => match[1]).sort()
 }
