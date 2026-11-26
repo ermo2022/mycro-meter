@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type WheelEvent } from 'react'
 import * as UTIF from 'utif'
-import { Crop, Download, FolderOpen, Move, Plus, RotateCcw, Save, Settings2, Trash2, X } from 'lucide-react'
+import { Crop, Download, FolderOpen, Image as ImageIcon, Move, Plus, RotateCcw, Save, Settings2, Trash2, X } from 'lucide-react'
 import { adjustImageCrop, constrainCropToBounds, cropContainsBounds, measurementCropBounds, resampleMicroscopeImage, translateCroppedMeasurements, type CropHandle, type ImageCrop } from './imageResampler'
 import { createImageRecord, deleteCalibrationPreset, deleteProject, deleteProjects, exportProjectBundle, importProjectBundle, listCalibrationPresets, listProjects, MAX_PROJECT_BYTES, MAX_SET_ATTACHMENTS, projectBinaryBytes, saveCalibrationPreset, saveImageRecord, saveSet, validAttachmentName, type CalibrationPreset, type SetAttachment, type StoredImageRecord, type StoredMeasurementSet } from './projectStorage'
 import { ImageProcessingPanel, ProjectLibrary, SetAttachments, SummarySettingsDialog } from './WorkspaceDialogs'
@@ -678,15 +678,13 @@ function App() {
         }
       }
 
-      detectionEpochRef.current += 1
+      resetAutoDetect()
       measurementGestureRef.current = null
       imageRef.current = image
       autoCircularCropAppliedRef.current = false
       setImageSize({ x: image.naturalWidth, y: image.naturalHeight })
       setImageUrl(url)
       lastDetectionPointRef.current = null
-      setSelectingReference(false)
-      setSporeReference(null)
       setPreviewOpen(false)
       setImageName(fileName)
       setImageId(restoredId ?? crypto.randomUUID())
@@ -703,8 +701,6 @@ function App() {
       setCalibrationDraft(null)
       setCalibrationLocked(false)
       setTool('calibrate')
-      setManualStart(null)
-      setManualDraft(null)
       setZoom(1)
       setPan({ x: 0, y: 0 })
 
@@ -814,10 +810,10 @@ function App() {
 
   const unloadImage = () => {
     imageLoadEpochRef.current += 1
+    resetAutoDetect()
     setImageBlob(null)
     setProcessingOpen(false)
     setMobilePanel(null)
-    detectionEpochRef.current += 1
     measurementGestureRef.current = null
     imageRef.current = null
     setPendingImport(null)
@@ -832,11 +828,7 @@ function App() {
     setCalibrationDraft(null)
     setCalibrationLocked(false)
     setMeasurements([])
-    setSelectingReference(false)
-    setSporeReference(null)
     setBoxEditor(null)
-    setManualStart(null)
-    setManualDraft(null)
     setDragOrigin(null)
     setZoom(1)
     setPan({ x: 0, y: 0 })
@@ -898,20 +890,42 @@ function App() {
     }
   }
 
+  const resetAutoDetect = () => {
+    referenceTokenRef.current += 1
+    detectionEpochRef.current += 1
+    if (selectingReference || editingReviewId) setBoxEditor(null)
+    setSelectingReference(false)
+    setSporeReference(null)
+    setMatchingBusy(false)
+    setDetectionReview(null)
+    setDetectionReviewError(null)
+    setEditingReviewId(null)
+    setRecordingDetections(false)
+    setIncludeTentativeMeasurements(false)
+    setShowRejectedOutlines(false)
+    setManualStart(null)
+    setManualDraft(null)
+    setDetecting(false)
+  }
+
   const startAutoDetect = () => {
     if (!calibration || detecting || matchingBusy) return
+    resetAutoDetect()
     setMobilePanel(null)
     setSelectingReference(true)
     setTool('measure')
     setCalibrationDraft(null)
-    setManualStart(null)
-    setManualDraft(null)
     setStatus('Click a representative spore to use as the reference')
   }
 
   const cancelAutoDetect = () => {
-    setSelectingReference(false)
+    resetAutoDetect()
     setStatus('Reference selection cancelled')
+  }
+
+  const discardAutoDetect = () => {
+    resetAutoDetect()
+    setStatus('Reference spore cleared')
   }
 
   const closeMobilePanel = () => {
@@ -1247,15 +1261,14 @@ function App() {
       } else {
         setStatus('No new measurements added · all detections overlap existing boxes')
       }
-      setDetectionReviewError(null)
-      referenceTokenRef.current += 1
-      setSporeReference(null)
-      setDetectionReview(null)
+      resetAutoDetect()
     } catch {
-      setStatus('Could not record detected spores')
-      setDetectionReviewError('Could not record detected spores')
+      if (referenceTokenRef.current === token) {
+        setStatus('Could not record detected spores')
+        setDetectionReviewError('Could not record detected spores')
+      }
     } finally {
-      setRecordingDetections(false)
+      if (referenceTokenRef.current === token) setRecordingDetections(false)
     }
   }
 
@@ -1577,7 +1590,7 @@ function App() {
           <button className="button button-quiet" type="button" onClick={() => { setMobileMenuOpen(false); setLibraryOpen(true) }}><FolderOpen size={16} />{t('Saved projects')}</button>
           <button className="button button-quiet" type="button" title={t('Import ZIP project or image record CSV')} onClick={() => { setMobileMenuOpen(false); importInputRef.current?.click() }}>{t('Import project')}</button>
           <input ref={importInputRef} className="visually-hidden" type="file" accept=".zip,.myproj,.csv,application/zip,text/csv,image/*" multiple onChange={handleImport} />
-          <button className="button button-quiet" type="button" onClick={() => { setMobileMenuOpen(false); fileInputRef.current?.click() }}>{t(imageUrl ? 'Replace image' : 'Open image')}</button>
+          <button className="button button-quiet" type="button" onClick={() => { setMobileMenuOpen(false); fileInputRef.current?.click() }}>{t(imageUrl ? 'New image' : 'Open image')}</button>
           {imageUrl && <button className="button button-unload" type="button" title={t('Unload image and clear its measurements')} onClick={() => { setMobileMenuOpen(false); unloadImage() }}><span aria-hidden="true">×</span> {t('Unload')}</button>}
           <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" onChange={handleUpload} />
         </div>
@@ -1590,6 +1603,7 @@ function App() {
             <button className={`tool-button ${tool === 'calibrate' ? 'is-active' : ''}`} type="button" title={t('Calibrate scale')} aria-label={t('Calibrate scale')} onClick={() => { setMobilePanel(null); setTool('calibrate'); setManualStart(null); setManualDraft(null); setStatus(calibrationLocked ? 'Drag either end to adjust, then enter the distance' : 'Click two points on a known scale bar') }}><span className="tool-glyph calibrate-glyph" /></button>
             {calibration && measurements.length > 0 && <button className={`tool-button ${tool === 'select' ? 'is-active' : ''}`} type="button" title={t('Select or edit a box')} aria-label={t('Select or edit a box')} disabled={!calibration || !measurements.length} onClick={() => { setMobilePanel(null); setTool('select') }}><span className="tool-glyph select-glyph"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v12l3.2-3.1 2.1 4.6 2-.9-2.1-4.5H12z" /></svg></span></button>}
             <button className={`tool-button ${tool === 'pan' ? 'is-active' : ''}`} type="button" title={t('Pan image')} aria-label={t('Pan image')} onClick={() => { setMobilePanel(null); setTool('pan') }}><span className="tool-glyph pan-glyph" /></button>
+            <button className="tool-button" type="button" title={t('New image')} aria-label={t('New image')} onClick={() => fileInputRef.current?.click()}><ImageIcon size={16} aria-hidden="true" /></button>
           </div>}
           {calibration && (measurements.length > 0 || manualStart) && <>
           <div className="rail-divider" />
@@ -1621,7 +1635,7 @@ function App() {
             {imageSize && <button className="button button-small" type="button" onClick={setFit} disabled={!imageSize}>{t('Fit view')}</button>}
             {imageSize && <button className={`tool-button ${processingOpen ? 'is-active' : ''}`} type="button" title={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample before calibration')} aria-label={t(calibration || measurements.length ? 'Crop image' : 'Crop and resample')} aria-pressed={processingOpen} disabled={cropBusy || detecting || matchingBusy || selectingReference} onClick={() => { if (processingOpen) { setProcessingOpen(false); setMobilePanel(null) } else openCrop() }}><Crop size={17} /></button>}
           </div>
-          {selectingReference && <div className="mobile-reference-prompt" role="status"><span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span><button className="text-button" type="button" onClick={cancelAutoDetect}>{t('Cancel')}</button></div>}
+          {selectingReference && <div className="mobile-reference-prompt" role="status"><span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span><button className="close-detection-flow" type="button" title={t('Cancel')} aria-label={t('Cancel')} onClick={cancelAutoDetect}><span aria-hidden="true">×</span></button></div>}
           {(detecting || matchingBusy) && <div className="detection-progress" role="status">
             <span className="activity-spinner" aria-hidden="true" />
             <span>{t(matchingBusy ? sporeReference?.features ? 'Searching the image for matching spores…' : 'Analysing reference spore…' : 'Detecting…')}</span>
@@ -1685,6 +1699,7 @@ function App() {
             )}
           </div>
           {sporeReference?.matches && !matchingBusy && !selectingReference && !processingOpen && <div className="mobile-detection-actions" role="region" aria-label={t('Review detections')}>
+            <button className="close-detection-flow" type="button" title={t('Clear reference')} aria-label={t('Clear reference')} onClick={discardAutoDetect}><span aria-hidden="true">×</span></button>
             {detectionMatchSummary}
             {tentativeRecoveryControl}
             {reviewDetectionsButton}
@@ -1783,9 +1798,10 @@ function App() {
             </div>
             {selectingReference && <div className="auto-detect-step" role="status">
               <span>{t('Click a representative spore on the image. You can refine the box before accepting it.')}</span>
-              <button className="text-button" type="button" onClick={cancelAutoDetect}>{t('Cancel')}</button>
+              <button className="close-detection-flow" type="button" title={t('Cancel')} aria-label={t('Cancel')} onClick={cancelAutoDetect}><span aria-hidden="true">×</span></button>
             </div>}
             {sporeReference && !selectingReference && <div className="auto-detect-reference" aria-busy={matchingBusy}>
+              <button className="close-detection-flow" type="button" title={t('Clear reference')} aria-label={t('Clear reference')} onClick={discardAutoDetect}><span aria-hidden="true">×</span></button>
               <i aria-hidden="true" />
               <span>{t('Reference spore')}</span>
               <strong>{formatLength(sporeReference.rect.width / calibration.pixelsPerUnit)} × {formatLength(sporeReference.rect.height / calibration.pixelsPerUnit)} {calibration.unit} · Q {(sporeReference.rect.width / sporeReference.rect.height).toFixed(2)}</strong>
@@ -1833,7 +1849,6 @@ function App() {
                   <button className="button" type="button" disabled={matchingBusy || recordingDetections || !exportableDetections.length} onClick={exportDetectedSpores}><Download size={16} aria-hidden="true" />{t('Export detections CSV')}</button>
                 </div>
               </div>
-              <button className="text-button" type="button" onClick={() => { referenceTokenRef.current += 1; setSporeReference(null); setStatus('Reference spore cleared') }}>{t('Clear reference')}</button>
             </div>}
             <label className="expert-mode-toggle">
               <input type="checkbox" checked={expertMode} onChange={(event) => setExpertMode(event.target.checked)} />
